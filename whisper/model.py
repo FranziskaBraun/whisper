@@ -95,6 +95,7 @@ class MultiHeadAttention(nn.Module):
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
+        cross_mask: Optional[Tensor] = None,
     ):
         q = self.query(x)
 
@@ -108,11 +109,11 @@ class MultiHeadAttention(nn.Module):
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        wv, qk = self.qkv_attention(q, k, v, mask)
+        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask)
         return self.out(wv), qk
 
     def qkv_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
+        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None, cross_mask: Optional[Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
@@ -163,10 +164,11 @@ class ResidualAttentionBlock(nn.Module):
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
+        cross_mask: Optional[Tensor] = None,
     ):
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
-            x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
+            x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_mask)[0]
         x = x + self.mlp(self.mlp_ln(x))
         return x
 
@@ -185,7 +187,7 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, mask: Optional[Tensor] = None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
@@ -198,7 +200,7 @@ class AudioEncoder(nn.Module):
         x = (x + self.positional_embedding).to(x.dtype)
 
         for block in self.blocks:
-            x = block(x)
+            x = block(x, mask=mask)
 
         x = self.ln_post(x)
         return x
@@ -224,7 +226,7 @@ class TextDecoder(nn.Module):
         mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
         self.register_buffer("mask", mask, persistent=False)
 
-    def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None):
+    def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, cross_mask: Optional[Tensor] = None):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
@@ -239,7 +241,7 @@ class TextDecoder(nn.Module):
         x = x.to(xa.dtype)
 
         for block in self.blocks:
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache)
+            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, cross_mask=cross_mask)
 
         x = self.ln(x)
         logits = (

@@ -112,6 +112,7 @@ class DecodingOptions:
 
     # implementation details
     fp16: bool = True  # use fp16 for most of the calculation
+    mask: Optional[Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -652,7 +653,7 @@ class DecodingTask:
             # encoded audio features are given; skip audio encoding
             audio_features = mel
         else:
-            audio_features = self.model.encoder(mel)
+            audio_features = self.model.encoder(mel, mask=self.options.mask)
 
         if audio_features.dtype != (
             torch.float16 if self.options.fp16 else torch.float32
