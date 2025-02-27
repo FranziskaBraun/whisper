@@ -113,6 +113,8 @@ class DecodingOptions:
     # implementation details
     fp16: bool = True  # use fp16 for most of the calculation
 
+    voice_intervals: Optional[List[Tuple[int, int]]] = None
+
 
 @dataclass(frozen=True)
 class DecodingResult:
@@ -128,7 +130,7 @@ class DecodingResult:
 
 
 class Inference:
-    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Tensor) -> Tensor:
         """Perform a forward pass on the decoder and return per-token logits"""
         raise NotImplementedError
 
@@ -152,7 +154,7 @@ class PyTorchInference(Inference):
         value_modules = [block.attn.value for block in self.model.decoder.blocks]
         self.kv_modules = key_modules + value_modules
 
-    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Optional[Tensor]) -> Tensor:
         if not self.kv_cache:
             self.kv_cache, self.hooks = self.model.install_kv_cache_hooks()
 
@@ -160,7 +162,7 @@ class PyTorchInference(Inference):
             # only need to use the last token except in the first forward pass
             tokens = tokens[:, -1:]
 
-        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache)
+        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache, cross_attn_mask=cross_attn_mask)
 
     def cleanup_caching(self):
         for hook in self.hooks:
@@ -239,7 +241,7 @@ class TokenDecoder:
             the tokens, appended with the selected next token
 
         completed : bool
-            True if all sequences has reached the end of text
+            True if all sequences has reached the end of textf
 
         """
         raise NotImplementedError
@@ -677,14 +679,44 @@ class DecodingTask:
 
         return languages, lang_probs
 
+    def get_cross_attn_mask(self) -> Optional[torch.Tensor]:
+        # Determine the number of audio feature frames (keys) in cross attention.
+        n_audio_ctx = self.model.dims.n_audio_ctx
+
+        # No voice intervals provided: return None (i.e. no masking)
+        if self.options.voice_intervals is None:
+            return None
+
+        # Initialize the mask with -inf (which would normally disable attention)
+        mask = torch.full((n_audio_ctx,), float("-inf"))
+
+        # Calculate scaling factor: default 30 seconds maps to n_audio_ctx frames.
+        scale = n_audio_ctx / 30000.0
+
+        # For each provided voice interval (in seconds), mark the corresponding frames as allowed (1.0)
+        # We assume intervals are half-open: [start, end)
+        for (start, end) in self.options.voice_intervals:
+            # Scale start and end times to frame indices
+            s = int(max(0, start * scale))
+            e = int(min(n_audio_ctx, end * scale))
+            if s < e:
+                mask[s:e] = 1.0
+
+        # Unsqueeze to add a batch dimension (shape: [1, n_audio_ctx])
+        return mask.unsqueeze(0)
+
+
     def _main_loop(self, audio_features: Tensor, tokens: Tensor):
         n_batch = tokens.shape[0]
         sum_logprobs: Tensor = torch.zeros(n_batch, device=audio_features.device)
         no_speech_probs = [np.nan] * n_batch
 
+        cross_attn_mask = self.get_cross_attn_mask()
+
+
         try:
             for i in range(self.sample_len):
-                logits = self.inference.logits(tokens, audio_features)
+                logits = self.inference.logits(tokens, audio_features, cross_attn_mask)
 
                 if (
                     i == 0 and self.tokenizer.no_speech is not None

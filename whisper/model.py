@@ -79,7 +79,7 @@ def disable_sdpa():
 
 
 class MultiHeadAttention(nn.Module):
-    use_sdpa = True
+    use_sdpa = False
 
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
@@ -128,8 +128,14 @@ class MultiHeadAttention(nn.Module):
             qk = None
         else:
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
+            # Unterscheide zwischen quadratischen Masken (z. B. self-attention)
+            # und rechteckigen Masken (z. B. cross-attention, shape: [n_ctx, n_audio_ctx])
             if mask is not None:
-                qk = qk + mask[:n_ctx, :n_ctx]
+                if mask.ndim == 2 and mask.size(0) != mask.size(1):
+                    qk = qk + mask.unsqueeze(0).unsqueeze(0)
+                else:
+                    # normal
+                    qk = qk + mask[:n_ctx, :n_ctx]
             qk = qk.float()
 
             w = F.softmax(qk, dim=-1).to(q.dtype)
@@ -142,7 +148,6 @@ class MultiHeadAttention(nn.Module):
 class ResidualAttentionBlock(nn.Module):
     def __init__(self, n_state: int, n_head: int, cross_attention: bool = False):
         super().__init__()
-
         self.attn = MultiHeadAttention(n_state, n_head)
         self.attn_ln = LayerNorm(n_state)
 
@@ -162,11 +167,15 @@ class ResidualAttentionBlock(nn.Module):
         x: Tensor,
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
+        cross_attn_mask: Optional[Tensor] = None,  # Neuer Parameter für Cross-Attention
         kv_cache: Optional[dict] = None,
     ):
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
-            x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
+            # Hier wird die cross_attn_mask an die Cross-Attention weitergereicht.
+            x = x + self.cross_attn(
+                self.cross_attn_ln(x), xa, mask=cross_attn_mask, kv_cache=kv_cache
+            )[0]
         x = x + self.mlp(self.mlp_ln(x))
         return x
 
@@ -224,26 +233,43 @@ class TextDecoder(nn.Module):
         mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
         self.register_buffer("mask", mask, persistent=False)
 
-    def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None):
+    def forward(
+            self,
+            x: Tensor,
+            xa: Tensor,
+            kv_cache: Optional[dict] = None,
+            cross_attn_mask: Optional[Tensor] = None,  # Übergabeparameter für Cross-Attention-Maskierung
+    ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
-            the text tokens
+            die Text-Tokens
         xa : torch.Tensor, shape = (batch_size, n_audio_ctx, n_audio_state)
-            the encoded audio features to be attended on
+            die encodierten Audio-Features, auf die geachtet werden soll
+
+        cross_attn_mask : torch.Tensor, shape = (n_ctx, n_audio_ctx)
+            die Maske für die Cross-Attention, wobei -inf Positionen kennzeichnet,
+            die maskiert werden sollen
         """
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
         x = (
-            self.token_embedding(x)
-            + self.positional_embedding[offset : offset + x.shape[-1]]
+                self.token_embedding(x)
+                + self.positional_embedding[offset: offset + x.shape[-1]]
         )
         x = x.to(xa.dtype)
 
+        # Übergabe der self-attention Maske (quadratisch) und der Cross-Attention Maske an alle Blöcke.
         for block in self.blocks:
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache)
+            x = block(
+                x,
+                xa,
+                mask=self.mask,
+                cross_attn_mask=cross_attn_mask,
+                kv_cache=kv_cache,
+            )
 
         x = self.ln(x)
         logits = (
-            x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)
+                x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)
         ).float()
 
         return logits
