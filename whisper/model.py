@@ -79,7 +79,7 @@ def disable_sdpa():
 
 
 class MultiHeadAttention(nn.Module):
-    use_sdpa = False
+    use_sdpa = True
 
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
@@ -121,9 +121,19 @@ class MultiHeadAttention(nn.Module):
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
         if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa:
-            a = scaled_dot_product_attention(
-                q, k, v, is_causal=mask is not None and n_ctx > 1
-            )
+
+            if mask is not None and mask.ndim == 2 and mask.size(0) != mask.size(1):
+                # convert all -inf to false and others to true
+                mask = mask != float("-inf")
+                print("SDPA using mask", mask.shape)
+                a = scaled_dot_product_attention(
+                    q, k, v, is_causal=mask is not None and n_ctx > 1, attn_mask=mask
+                )
+            else:
+                a = scaled_dot_product_attention(
+                    q, k, v, is_causal=mask is not None and n_ctx > 1
+                )
+
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = None
         else:
@@ -194,24 +204,27 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, silence_mask: Optional[Tensor] = None):
         """
-        x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
-            the mel spectrogram of the audio
+        x: Tensor of shape (batch, n_mels, n_ctx)
+        silence_mask: Optional[Tensor] of shape (batch, n_ctx) with True für stumme Frames
         """
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
-
-        assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"
         x = (x + self.positional_embedding).to(x.dtype)
 
-        for block in self.blocks:
-            x = block(x)
+        if silence_mask is not None:
+            # Konvertiere den boolean-Masken-Vektor in eine Maske mit -inf für stumm
+            # und erweitere die Dimension für die Addierung zu den Attention-Scores.
+            mask = silence_mask.float().masked_fill(silence_mask, float('-inf')).unsqueeze(1)
+        else:
+            mask = None
 
+        for block in self.blocks:
+            x = block(x, mask=mask)
         x = self.ln_post(x)
         return x
-
 
 class TextDecoder(nn.Module):
     def __init__(
