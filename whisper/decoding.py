@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Tuple, Union, Literal
 
 import numpy as np
 import torch
@@ -114,7 +114,7 @@ class DecodingOptions:
     fp16: bool = True  # use fp16 for most of the calculation
 
     voice_intervals: Optional[List[Tuple[int, int]]] = None
-    silence_masking: str = "both" # "both", "start", "end", or "none"
+    audio_masking_type: Literal["encoder_attn", "cross_attn", "both"] = "cross_attn"
 
 
 @dataclass(frozen=True)
@@ -650,8 +650,8 @@ class DecodingTask:
 
         if mel.shape[-2:] != (self.model.dims.n_audio_ctx, self.model.dims.n_audio_state):
             silence_mask = None
-            # Falls im Encoder maskiert werden soll:
-            if self.options.silence_masking in ("encoder", "both"):
+
+            if self.options.audio_masking_type in ("encoder_attn", "both"):
                 silence_mask = self.get_encoder_silence_mask(self.model.dims.n_audio_ctx, mel.shape[0])
             audio_features = self.model.encoder(mel, silence_mask=silence_mask)
         else:
@@ -678,41 +678,43 @@ class DecodingTask:
 
         return languages, lang_probs
 
-
     def get_encoder_silence_mask(self, n_audio_ctx: int, n_audio: int) -> Optional[Tensor]:
         """
-        Erzeugt eine boolean Maske der Form (n_audio, n_audio_ctx), in der True für stumme Frames steht.
-        Falls voice_intervals nicht gesetzt sind, wird None zurückgegeben.
+        Generates a boolean mask of shape (n_audio, n_audio_ctx), where True indicates silent frames.
+        If voice_intervals are not set, returns None.
         """
         if self.options.voice_intervals is None:
             return None
-        # Erstelle für jedes Audio eine Maske, die standardmäßig alle Frames als stumm markiert.
+        # Create a mask for each audio input, initially marking all frames as silent.
         mask = torch.ones((n_audio, n_audio_ctx), dtype=torch.bool, device=self.model.device)
-        # Hier nehmen wir an, dass die Gesamt-Dauer des Audios 30 Sekunden (30000ms) beträgt.
-        # Der Skalierungsfaktor ordnet n_audio_ctx Frames der Gesamtdauer zu.
+        # Assume the total audio duration is 30 seconds (30000ms).
+        # The scale factor maps n_audio_ctx frames to the total duration.
         scale = n_audio_ctx / 30000.0
         for (start, end) in self.options.voice_intervals:
             s = int(max(0, start * scale))
             e = int(min(n_audio_ctx, end * scale))
             if s < e:
-                # In den angegebenen Intervallen gilt: Es ist Sprache → nicht stumm.
+                # Within the specified intervals: mark frames as containing speech (not silent).
                 mask[:, s:e] = False
         return mask
 
     def get_cross_attn_mask(self) -> Optional[torch.Tensor]:
-        # Falls im Decoder maskiert werden soll (oder in beiden Komponenten), berechnen wir die Maske:
-        if self.options.silence_masking in ("decoder", "both"):
+        """
+        Computes an attention mask for decoder cross-attention, marking allowed frames with 1.0 and disallowed frames with -inf.
+        If masking is disabled or voice_intervals are not provided, returns None.
+        """
+        if self.options.audio_masking_type in ("cross_attn", "both"):
             n_audio_ctx = self.model.dims.n_audio_ctx
-            # No voice intervals provided: return None (i.e. no masking)
+            # No voice intervals provided: return None (i.e., no masking)
             if self.options.voice_intervals is None:
                 return None
 
-            # Initialize the mask with -inf (which disables attention)
+            # Initialize mask with -inf (disabling attention by default)
             mask = torch.full((n_audio_ctx,), float("-inf"))
-            # Skalierungsfaktor: standardmäßig 30 Sekunden -> n_audio_ctx Frames
+            # Scale factor: assuming audio duration of 30 seconds mapped to n_audio_ctx frames
             scale = n_audio_ctx / 30000.0
 
-            # Für jedes angegebene Voice-Intervall: Markiere die entsprechenden Frames als erlaubt (1.0)
+            # For each provided voice interval: mark corresponding frames as allowed (1.0)
             for (start, end) in self.options.voice_intervals:
                 s = int(max(0, start * scale))
                 e = int(min(n_audio_ctx, end * scale))

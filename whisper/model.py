@@ -125,7 +125,6 @@ class MultiHeadAttention(nn.Module):
             if mask is not None and mask.ndim == 2 and mask.size(0) != mask.size(1):
                 # convert all -inf to false and others to true
                 mask = mask != float("-inf")
-                print("SDPA using mask", mask.shape)
                 a = scaled_dot_product_attention(
                     q, k, v, is_causal=mask is not None and n_ctx > 1, attn_mask=mask
                 )
@@ -138,13 +137,13 @@ class MultiHeadAttention(nn.Module):
             qk = None
         else:
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
-            # Unterscheide zwischen quadratischen Masken (z. B. self-attention)
-            # und rechteckigen Masken (z. B. cross-attention, shape: [n_ctx, n_audio_ctx])
+            # Differentiate between square masks (e.g., self-attention)
+            # and rectangular masks (e.g., cross-attention, shape: [n_ctx, n_audio_ctx])
             if mask is not None:
                 if mask.ndim == 2 and mask.size(0) != mask.size(1):
                     qk = qk + mask.unsqueeze(0).unsqueeze(0)
                 else:
-                    # normal
+                    # regular square mask
                     qk = qk + mask[:n_ctx, :n_ctx]
             qk = qk.float()
 
