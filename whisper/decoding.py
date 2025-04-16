@@ -112,7 +112,8 @@ class DecodingOptions:
 
     # implementation details
     fp16: bool = True  # use fp16 for most of the calculation
-    mask: Optional[Tensor] = None
+    self_mask: Optional[Tensor] = None
+    cross_mask: Optional[Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,7 @@ class PyTorchInference(Inference):
         value_modules = [block.attn.value for block in self.model.decoder.blocks]
         self.kv_modules = key_modules + value_modules
 
-    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, cross_mask: Optional[Tensor] = None) -> Tensor:
         if not self.kv_cache:
             self.kv_cache, self.hooks = self.model.install_kv_cache_hooks()
 
@@ -161,7 +162,7 @@ class PyTorchInference(Inference):
             # only need to use the last token except in the first forward pass
             tokens = tokens[:, -1:]
 
-        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache)
+        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache, cross_mask=cross_mask)
 
     def cleanup_caching(self):
         for hook in self.hooks:
@@ -653,7 +654,7 @@ class DecodingTask:
             # encoded audio features are given; skip audio encoding
             audio_features = mel
         else:
-            audio_features = self.model.encoder(mel, mask=self.options.mask)
+            audio_features = self.model.encoder(mel, self_mask=self.options.self_mask)
 
         if audio_features.dtype != (
             torch.float16 if self.options.fp16 else torch.float32
@@ -685,7 +686,7 @@ class DecodingTask:
 
         try:
             for i in range(self.sample_len):
-                logits = self.inference.logits(tokens, audio_features)
+                logits = self.inference.logits(tokens, audio_features, cross_mask=self.options.cross_mask)
 
                 if (
                     i == 0 and self.tokenizer.no_speech is not None

@@ -95,6 +95,7 @@ class MultiHeadAttention(nn.Module):
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
+        self_mask: Optional[Tensor] = None,
         cross_mask: Optional[Tensor] = None,
     ):
         q = self.query(x)
@@ -109,12 +110,12 @@ class MultiHeadAttention(nn.Module):
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask)
+        wv, qk = self.qkv_attention(q, k, v, mask, self_mask, cross_mask)
         return self.out(wv), qk
 
     def qkv_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None, cross_mask: Optional[Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None,  self_mask: Optional[Tensor] = None, cross_mask: Optional[Tensor] = None,
+    ):
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
         q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
@@ -131,6 +132,10 @@ class MultiHeadAttention(nn.Module):
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
             if mask is not None:
                 qk = qk + mask[:n_ctx, :n_ctx]
+            if self_mask is not None:
+                qk = qk + self_mask[:n_ctx, :n_ctx]
+            if cross_mask is not None:
+                qk = qk + cross_mask.unsqueeze(0).unsqueeze(0)
             qk = qk.float()
 
             w = F.softmax(qk, dim=-1).to(q.dtype)
@@ -164,9 +169,10 @@ class ResidualAttentionBlock(nn.Module):
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
+        self_mask: Optional[Tensor] = None,
         cross_mask: Optional[Tensor] = None,
     ):
-        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
+        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache, self_mask=self_mask)[0]
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_mask)[0]
         x = x + self.mlp(self.mlp_ln(x))
@@ -187,7 +193,7 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x: Tensor, mask: Optional[Tensor] = None):
+    def forward(self, x: Tensor, self_mask: Optional[Tensor] = None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
@@ -200,7 +206,7 @@ class AudioEncoder(nn.Module):
         x = (x + self.positional_embedding).to(x.dtype)
 
         for block in self.blocks:
-            x = block(x, mask=mask)
+            x = block(x, self_mask=self_mask)
 
         x = self.ln_post(x)
         return x
