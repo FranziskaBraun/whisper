@@ -21,6 +21,13 @@ except (ImportError, RuntimeError, OSError):
     scaled_dot_product_attention = None
     SDPA_AVAILABLE = False
 
+# utils/attention_recorder.py
+from pathlib import Path
+from typing import List
+import numpy as np
+import matplotlib.pyplot as plt
+import imageio.v3 as iio
+
 
 @dataclass
 class ModelDimensions:
@@ -95,6 +102,8 @@ class MultiHeadAttention(nn.Module):
             xa: Optional[Tensor] = None,
             mask: Optional[Tensor] = None,
             kv_cache: Optional[dict] = None,
+            cross_mask: Optional[Tensor] = None,
+            layer: Optional[int] = None,
     ):
         q = self.query(x)
 
@@ -108,11 +117,12 @@ class MultiHeadAttention(nn.Module):
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        wv, qk = self.qkv_attention(q, k, v, mask)
+        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask, layer=layer)
         return self.out(wv), qk
 
     def qkv_attention(
-            self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
+            self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None, cross_mask: Optional[Tensor] = None,
+            layer: Optional[int] = None
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
@@ -143,30 +153,42 @@ class MultiHeadAttention(nn.Module):
             qk = None
         else:
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
-            # Differentiate between square masks (e.g., self-attention)
-            # and rectangular masks (e.g., cross-attention, shape: [n_ctx, n_audio_ctx])
-            if mask is not None:
-                if mask.ndim == 2 and mask.size(0) != mask.size(1):
-                    real_mask = mask.clone()
-                    # look at min max median values of qk to scale mask
 
-                    real_mask = real_mask.unsqueeze(0).unsqueeze(0)
-                    real_mask = real_mask.expand(-1, qk.shape[1], qk.shape[2], -1)
-                    qk = qk + real_mask
-                else:
-                    # regular square mask
-                    qk = qk + mask[:n_ctx, :n_ctx]
+            if mask is not None:
+                qk = qk + mask[:n_ctx, :n_ctx]
+            if cross_mask is not None:
+                qk = qk + cross_mask.unsqueeze(0).unsqueeze(0)
+
             qk = qk.float()
 
             w = F.softmax(qk, dim=-1).to(q.dtype)
-            # HEre nullen
-
-            if mask is not None and mask.ndim == 2 and mask.size(0) != mask.size(1):
-                real_mask = mask.clone()
-                # inf to 0 and others to 1
-
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = qk.detach()
+
+            if cross_mask is not None and layer is not None and n_batch == 1:
+                w_mean = w.mean(dim=1)  # -> (batch, T_dec, T_enc)
+
+                from .attn_recorder import get_recorder
+                rec = get_recorder()
+                if rec is not None:
+                    rec.add(layer, w_mean[0])
+
+                if True:
+                    import matplotlib.pyplot as plt
+
+                    # w hat Shape [batch, n_head, T_dec, T_enc].
+                    # Wir wollen über n_head mitteln:
+                    w_mean = w.mean(dim=1)  # => [batch, T_dec, T_enc]
+
+                    plt.figure(figsize=(12, 8))
+                    # Wir nehmen batch=0 und plotten. Y => T_dec, X => T_enc
+
+                    plt.imshow(w_mean[0].cpu().numpy(), aspect='auto', origin='lower')
+                    plt.title(f"Cross-Attention Layer {layer} (Heads gemittelt)")
+                    plt.xlabel("Encoder-Positionen")
+                    plt.ylabel("Decoder-Positionen")
+                    plt.colorbar()
+                    plt.show()
 
         return out, qk
 
@@ -195,14 +217,12 @@ class ResidualAttentionBlock(nn.Module):
             mask: Optional[Tensor] = None,
             cross_attn_mask: Optional[Tensor] = None,  # Neuer Parameter für Cross-Attention
             kv_cache: Optional[dict] = None,
+            layer: Optional[int] = None,
     ):
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
-            # Hier wird die cross_attn_mask an die Cross-Attention weitergereicht.
-            # TODO: investigate if mask should be merged with cross_attn_mask
-
             x = x + self.cross_attn(
-                self.cross_attn_ln(x), xa, mask=cross_attn_mask, kv_cache=kv_cache
+                self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_attn_mask, layer=layer
             )[0]
         x = x + self.mlp(self.mlp_ln(x))
         return x
@@ -290,13 +310,15 @@ class TextDecoder(nn.Module):
         x = x.to(xa.dtype)
 
         # Übergabe der self-attention Maske (quadratisch) und der Cross-Attention Maske an alle Blöcke.
-        for block in self.blocks:
+        for idx, block in enumerate(self.blocks):
+            # print(f"Layer {idx + 1} of {len(self.blocks)}")
             x = block(
                 x,
                 xa,
                 mask=self.mask,
                 cross_attn_mask=cross_attn_mask,
                 kv_cache=kv_cache,
+                layer=idx,
             )
 
         x = self.ln(x)
@@ -308,8 +330,13 @@ class TextDecoder(nn.Module):
 
 
 class Whisper(nn.Module):
-    def __init__(self, dims: ModelDimensions):
+    def __init__(self, dims: ModelDimensions, enable_attn_recorder: bool = False):
         super().__init__()
+
+        if enable_attn_recorder:
+            from . import attn_recorder
+            attn_recorder.RECORDER = attn_recorder.AttentionRecorder(dims.n_text_layer)
+
         self.dims = dims
         self.encoder = AudioEncoder(
             self.dims.n_mels,

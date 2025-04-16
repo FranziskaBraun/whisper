@@ -717,7 +717,7 @@ class DecodingTask:
             # Im unsmoothten Fall verwenden wir wirklich -∞,
             # im smoothten Fall wird ein sehr kleiner Wert benutzt, sodass eine Interpolation möglich ist.
             # low_val = float("-inf") if not smooth else -1.00
-            low_val = float('-inf') if not smooth else -1.00
+            low_val = float("-inf") if not smooth else -1.00
 
             # Initialisiere die Maske mit dem unteren Wert.
             mask = torch.full((n_audio_ctx,), low_val)
@@ -732,7 +732,7 @@ class DecodingTask:
                 if s < e:
                     if not smooth:
                         # Klassische, harte Maske
-                        mask[s:e] = 1.0
+                        mask[s:e] = 0.0
                     else:
                         # Glätten der Maske durch lineare Übergänge an den Rändern.
                         length = e - s
@@ -765,7 +765,7 @@ class DecodingTask:
         else:
             return None
 
-    def _main_loop(self, audio_features: Tensor, tokens: Tensor):
+    def _main_loop(self, audio_features: Tensor, tokens: Tensor, tokenizer: Tokenizer):
         n_batch = tokens.shape[0]
         sum_logprobs: Tensor = torch.zeros(n_batch, device=audio_features.device)
         no_speech_probs = [np.nan] * n_batch
@@ -774,6 +774,7 @@ class DecodingTask:
 
         try:
             for i in range(self.sample_len):
+                # print(f"Logit round: {i}")
                 logits = self.inference.logits(tokens, audio_features, cross_attn_mask)
 
                 if (
@@ -791,6 +792,7 @@ class DecodingTask:
 
                 # expand the tokens tensor with the selected next tokens
                 tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
+                print([tokenizer.decode(t).strip() for t in tokens])
 
                 if completed or tokens.shape[-1] > self.n_ctx:
                     break
@@ -824,7 +826,7 @@ class DecodingTask:
         tokens = tokens.repeat_interleave(self.n_group, dim=0).to(audio_features.device)
 
         # call the main sampling loop
-        tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens)
+        tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens, tokenizer)
 
         # reshape the tensors to have (n_audio, n_group) as the first two dimensions
         audio_features = audio_features[:: self.n_group]
@@ -912,5 +914,11 @@ def decode(
         options = replace(options, **kwargs)
 
     result = DecodingTask(model, options).run(mel)
+
+    from .attn_recorder import get_recorder
+    rec = get_recorder()
+    if rec is not None:
+        rec.save()
+    # -------------------------
 
     return result[0] if single else result

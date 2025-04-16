@@ -72,11 +72,11 @@ def _download(url: str, root: str, in_memory: bool) -> Union[bytes, str]:
 
     with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
         with tqdm(
-            total=int(source.info().get("Content-Length")),
-            ncols=80,
-            unit="iB",
-            unit_scale=True,
-            unit_divisor=1024,
+                total=int(source.info().get("Content-Length")),
+                ncols=80,
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
         ) as loop:
             while True:
                 buffer = source.read(8192)
@@ -101,10 +101,11 @@ def available_models() -> List[str]:
 
 
 def load_model(
-    name: str,
-    device: Optional[Union[str, torch.device]] = None,
-    download_root: str = None,
-    in_memory: bool = False,
+        name: str,
+        device: Optional[Union[str, torch.device]] = None,
+        download_root: str = None,
+        in_memory: bool = False,
+        enable_attn_recorder: bool = False,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -145,13 +146,13 @@ def load_model(
         )
 
     with (
-        io.BytesIO(checkpoint_file) if in_memory else open(checkpoint_file, "rb")
+            io.BytesIO(checkpoint_file) if in_memory else open(checkpoint_file, "rb")
     ) as fp:
         checkpoint = torch.load(fp, map_location=device)
     del checkpoint_file
 
     dims = ModelDimensions(**checkpoint["dims"])
-    model = Whisper(dims)
+    model = Whisper(dims, enable_attn_recorder=enable_attn_recorder)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     if alignment_heads is not None:

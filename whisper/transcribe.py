@@ -130,7 +130,7 @@ def transcribe(
         if torch.cuda.is_available():
             warnings.warn("Performing inference on CPU when CUDA is available")
         if dtype == torch.float16:
-            warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+            # warnings.warn("FP16 is not supported on CPU; using FP32 instead")
             dtype = torch.float32
 
     if dtype == torch.float32:
@@ -176,7 +176,7 @@ def transcribe(
     if len(seek_points) % 2 == 1:
         seek_points.append(content_frames)
     seek_clips: List[Tuple[int, int]] = list(zip(seek_points[::2], seek_points[1::2]))
-    print("Seek_clips", seek_clips)
+    # print("Seek_clips", seek_clips)
 
     punctuation = "\"'“¿([{-\"'.。,，!！?？:：”)]}、"
 
@@ -235,14 +235,8 @@ def transcribe(
                 kwargs.pop("best_of", None)
 
             options = DecodingOptions(**kwargs, temperature=t, audio_masking_type="cross_attn",
-                                      voice_intervals=transcription_segments, language="de")
+                                      voice_intervals=transcription_segments)
             decode_result = model.decode(segment, options)
-
-            tokens = torch.tensor(decode_result.tokens)
-            tokens = tokens.tolist()
-            text_tokens = [token for token in tokens if token < tokenizer.eot]
-            print(f"Transcription-Segments: {transcription_segments}")
-            print(tokenizer.decode(text_tokens))
 
             needs_fallback = False
             if (
@@ -334,7 +328,7 @@ def transcribe(
             # Calculate padding amount
             padding_frames = N_FRAMES - segment_size
             padding_seconds = padding_frames * HOP_LENGTH / SAMPLE_RATE
-            print(f"Padding added: {padding_seconds:.3f} seconds")
+            # print(f"Padding added: {padding_seconds:.3f} seconds")
 
             # Pad or trim
             mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
@@ -355,6 +349,10 @@ def transcribe(
                     chunk_start_ms,
                     chunk_end_ms
                 )
+                if len(relevant_intervals) == 0:
+                    # no relevant intervals, skip this chunk
+                    seek += segment_size
+                    continue
             else:
                 relevant_intervals = None
 
