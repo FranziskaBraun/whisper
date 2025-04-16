@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 @torch.no_grad()
 def detect_language(
-    model: "Whisper", mel: Tensor, tokenizer: Tokenizer = None
+        model: "Whisper", mel: Tensor, tokenizer: Tokenizer = None
 ) -> Tuple[Tensor, List[dict]]:
     """
     Detect the spoken language in the audio, and return them as list of strings, along with the ids
@@ -36,8 +36,8 @@ def detect_language(
             model.is_multilingual, num_languages=model.num_languages
         )
     if (
-        tokenizer.language is None
-        or tokenizer.language_token not in tokenizer.sot_sequence
+            tokenizer.language is None
+            or tokenizer.language_token not in tokenizer.sot_sequence
     ):
         raise ValueError(
             "This model doesn't have language tokens so it can't perform lang id"
@@ -114,7 +114,7 @@ class DecodingOptions:
     fp16: bool = True  # use fp16 for most of the calculation
 
     voice_intervals: Optional[List[Tuple[int, int]]] = None
-    audio_masking_type: Literal["encoder_attn", "cross_attn", "both"] = "cross_attn"
+    audio_masking_type: Literal["encoder_attn", "cross_attn", "both"] = "encoder_attn"
 
 
 @dataclass(frozen=True)
@@ -181,7 +181,7 @@ class PyTorchInference(Inference):
 
 class SequenceRanker:
     def rank(
-        self, tokens: List[List[Tensor]], sum_logprobs: List[List[float]]
+            self, tokens: List[List[Tensor]], sum_logprobs: List[List[float]]
     ) -> List[int]:
         """
         Given a list of groups of samples and their cumulative log probabilities,
@@ -221,7 +221,7 @@ class TokenDecoder:
         """Initialize any stateful variables for decoding a new sequence"""
 
     def update(
-        self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
+            self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
     ) -> Tuple[Tensor, bool]:
         """Specify how to select the next token, based on the current trace and logits
 
@@ -248,7 +248,7 @@ class TokenDecoder:
         raise NotImplementedError
 
     def finalize(
-        self, tokens: Tensor, sum_logprobs: Tensor
+            self, tokens: Tensor, sum_logprobs: Tensor
     ) -> Tuple[Sequence[Sequence[Tensor]], List[List[float]]]:
         """Finalize search and return the final candidate sequences
 
@@ -278,7 +278,7 @@ class GreedyDecoder(TokenDecoder):
         self.eot = eot
 
     def update(
-        self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
+            self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
     ) -> Tuple[Tensor, bool]:
         if self.temperature == 0:
             next_tokens = logits.argmax(dim=-1)
@@ -303,11 +303,11 @@ class GreedyDecoder(TokenDecoder):
 
 class BeamSearchDecoder(TokenDecoder):
     def __init__(
-        self,
-        beam_size: int,
-        eot: int,
-        inference: Inference,
-        patience: Optional[float] = None,
+            self,
+            beam_size: int,
+            eot: int,
+            inference: Inference,
+            patience: Optional[float] = None,
     ):
         self.beam_size = beam_size
         self.eot = eot
@@ -317,14 +317,14 @@ class BeamSearchDecoder(TokenDecoder):
         self.finished_sequences = None
 
         assert (
-            self.max_candidates > 0
+                self.max_candidates > 0
         ), f"Invalid beam size ({beam_size}) or patience ({patience})"
 
     def reset(self):
         self.finished_sequences = None
 
     def update(
-        self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
+            self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
     ) -> Tuple[Tensor, bool]:
         if tokens.shape[0] % self.beam_size != 0:
             raise ValueError(f"{tokens.shape}[0] % {self.beam_size} != 0")
@@ -370,7 +370,7 @@ class BeamSearchDecoder(TokenDecoder):
         # add newly finished sequences to self.finished_sequences
         assert len(self.finished_sequences) == len(finished_sequences)
         for previously_finished, newly_finished in zip(
-            self.finished_sequences, finished_sequences
+                self.finished_sequences, finished_sequences
         ):
             for seq in sorted(newly_finished, key=newly_finished.get, reverse=True):
                 if len(previously_finished) >= self.max_candidates:
@@ -389,7 +389,7 @@ class BeamSearchDecoder(TokenDecoder):
         sum_logprobs = sum_logprobs.cpu()
         for i, sequences in enumerate(self.finished_sequences):
             if (
-                len(sequences) < self.beam_size
+                    len(sequences) < self.beam_size
             ):  # when not enough sequences are finished
                 for j in list(np.argsort(sum_logprobs[i]))[::-1]:
                     sequence = preceding_tokens[i, j].tolist() + [self.eot]
@@ -443,10 +443,10 @@ class SuppressTokens(LogitFilter):
 
 class ApplyTimestampRules(LogitFilter):
     def __init__(
-        self,
-        tokenizer: Tokenizer,
-        sample_begin: int,
-        max_initial_timestamp_index: Optional[int],
+            self,
+            tokenizer: Tokenizer,
+            sample_begin: int,
+            max_initial_timestamp_index: Optional[int],
     ):
         self.tokenizer = tokenizer
         self.sample_begin = sample_begin
@@ -459,18 +459,18 @@ class ApplyTimestampRules(LogitFilter):
 
         # timestamps have to appear in pairs, except directly before EOT; mask logits accordingly
         for k in range(tokens.shape[0]):
-            sampled_tokens = tokens[k, self.sample_begin :]
+            sampled_tokens = tokens[k, self.sample_begin:]
             seq = [t for t in sampled_tokens.tolist()]
             last_was_timestamp = (
-                len(seq) >= 1 and seq[-1] >= self.tokenizer.timestamp_begin
+                    len(seq) >= 1 and seq[-1] >= self.tokenizer.timestamp_begin
             )
             penultimate_was_timestamp = (
-                len(seq) < 2 or seq[-2] >= self.tokenizer.timestamp_begin
+                    len(seq) < 2 or seq[-2] >= self.tokenizer.timestamp_begin
             )
 
             if last_was_timestamp:
                 if penultimate_was_timestamp:  # has to be non-timestamp
-                    logits[k, self.tokenizer.timestamp_begin :] = -np.inf
+                    logits[k, self.tokenizer.timestamp_begin:] = -np.inf
                 else:  # cannot be normal text tokens
                     logits[k, : self.tokenizer.eot] = -np.inf
 
@@ -484,7 +484,7 @@ class ApplyTimestampRules(LogitFilter):
                     timestamp_last = timestamps[-1]
                 else:
                     timestamp_last = timestamps[-1] + 1
-                logits[k, self.tokenizer.timestamp_begin : timestamp_last] = -np.inf
+                logits[k, self.tokenizer.timestamp_begin: timestamp_last] = -np.inf
 
         if tokens.shape[1] == self.sample_begin:
             # suppress generating non-timestamp tokens at the beginning
@@ -493,14 +493,14 @@ class ApplyTimestampRules(LogitFilter):
             # apply the `max_initial_timestamp` option
             if self.max_initial_timestamp_index is not None:
                 last_allowed = (
-                    self.tokenizer.timestamp_begin + self.max_initial_timestamp_index
+                        self.tokenizer.timestamp_begin + self.max_initial_timestamp_index
                 )
-                logits[:, last_allowed + 1 :] = -np.inf
+                logits[:, last_allowed + 1:] = -np.inf
 
         # if sum of probability over timestamps is above any other token, sample timestamp
         logprobs = F.log_softmax(logits.float(), dim=-1)
         for k in range(tokens.shape[0]):
-            timestamp_logprob = logprobs[k, self.tokenizer.timestamp_begin :].logsumexp(
+            timestamp_logprob = logprobs[k, self.tokenizer.timestamp_begin:].logsumexp(
                 dim=-1
             )
             max_text_token_logprob = logprobs[k, : self.tokenizer.timestamp_begin].max()
@@ -581,7 +581,7 @@ class DecodingTask:
         if options.patience is not None and options.beam_size is None:
             raise ValueError("patience requires beam_size to be given")
         if options.length_penalty is not None and not (
-            0 <= options.length_penalty <= 1
+                0 <= options.length_penalty <= 1
         ):
             raise ValueError("length_penalty (alpha) should be a value between 0 and 1")
 
@@ -608,9 +608,9 @@ class DecodingTask:
                 else prompt
             )
             tokens = (
-                [self.tokenizer.sot_prev]
-                + prompt_tokens[-(self.n_ctx // 2 - 1) :]
-                + tokens
+                    [self.tokenizer.sot_prev]
+                    + prompt_tokens[-(self.n_ctx // 2 - 1):]
+                    + tokens
             )
 
         return tuple(tokens)
@@ -698,32 +698,72 @@ class DecodingTask:
                 mask[:, s:e] = False
         return mask
 
-    def get_cross_attn_mask(self) -> Optional[torch.Tensor]:
+    def get_cross_attn_mask(self, smooth=False) -> Optional[torch.Tensor]:
         """
-        Computes an attention mask for decoder cross-attention, marking allowed frames with 1.0 and disallowed frames with -inf.
-        If masking is disabled or voice_intervals are not provided, returns None.
+        Berechnet eine Attention-Maske für den Decoder-Cross-Attention-Mechanismus.
+        Erlaubte Frames werden standardmäßig mit 1.0 markiert, nicht erlaubte mit -∞.
+        Wenn smooth=True gesetzt ist, wird ein glatter Übergang (Ramp-up und Ramp-down)
+        zwischen erlaubten und maskierten Bereichen eingeführt.
+        Falls keine Sprachintervalle (voice_intervals) vorhanden sind, wird None zurückgegeben.
         """
         if self.options.audio_masking_type in ("cross_attn", "both"):
             n_audio_ctx = self.model.dims.n_audio_ctx
-            # No voice intervals provided: return None (i.e., no masking)
+
+            # Falls keine voice_intervals vorliegen, gib None zurück.
             if self.options.voice_intervals is None:
                 return None
 
-            # Initialize mask with -inf (disabling attention by default)
-            mask = torch.full((n_audio_ctx,), float("-inf"))
-            # Scale factor: assuming audio duration of 30 seconds mapped to n_audio_ctx frames
+            # Definiere den unteren Maskierungswert:
+            # Im unsmoothten Fall verwenden wir wirklich -∞,
+            # im smoothten Fall wird ein sehr kleiner Wert benutzt, sodass eine Interpolation möglich ist.
+            # low_val = float("-inf") if not smooth else -1.00
+            low_val = float('-inf') if not smooth else -1.00
+
+            # Initialisiere die Maske mit dem unteren Wert.
+            mask = torch.full((n_audio_ctx,), low_val)
+
+            # Skalierungsfaktor: Annahme einer Audiodauer von 30 Sekunden,
+            # wobei 30000 ms auf n_audio_ctx Frames abgebildet werden.
             scale = n_audio_ctx / 30000.0
 
-            # For each provided voice interval: mark corresponding frames as allowed (1.0)
             for (start, end) in self.options.voice_intervals:
                 s = int(max(0, start * scale))
                 e = int(min(n_audio_ctx, end * scale))
                 if s < e:
-                    mask[s:e] = 1.0
+                    if not smooth:
+                        # Klassische, harte Maske
+                        mask[s:e] = 1.0
+                    else:
+                        # Glätten der Maske durch lineare Übergänge an den Rändern.
+                        length = e - s
+                        # Definiere die Übergangslänge (margin): maximal 40 Frames,
+                        # wobei sie nicht größer als die halbe Länge des Intervalls sein darf.
+                        margin = min(40, length // 2) if length >= 2 else 0
+
+                        # Falls das Intervall den Anfang (s == 0) oder das Ende (e == n_audio_ctx) der Sequenz berührt,
+                        # soll für den entsprechenden Bereich kein Ramping erfolgen.
+                        ramp_up_margin = margin if s > 0 else 0
+                        ramp_down_margin = margin if e < n_audio_ctx else 0
+
+                        if ramp_up_margin > 0 or ramp_down_margin > 0:
+                            # Ramp-up, falls anwendbar.
+                            if ramp_up_margin > 0:
+                                ramp_up = torch.linspace(low_val, 1.0, steps=ramp_up_margin, device=mask.device)
+                                mask[s:s + ramp_up_margin] = ramp_up
+                            # Zentraler Bereich: konstanter Wert 1.0.
+                            mask[s + ramp_up_margin:e - ramp_down_margin] = 1.0
+                            # Ramp-down, falls anwendbar.
+                            if ramp_down_margin > 0:
+                                ramp_down = torch.linspace(1.0, low_val, steps=ramp_down_margin, device=mask.device)
+                                mask[e - ramp_down_margin:e] = ramp_down
+                        else:
+                            # Kein Ramping, da das Intervall den Rand berührt oder zu kurz ist.
+                            mask[s:e] = 1.0
+
+            # Unsqueeze, falls von der Aufruferseite ein Batch-Dimension erwartet wird.
             return mask.unsqueeze(0)
         else:
             return None
-
 
     def _main_loop(self, audio_features: Tensor, tokens: Tensor):
         n_batch = tokens.shape[0]
@@ -732,13 +772,12 @@ class DecodingTask:
 
         cross_attn_mask = self.get_cross_attn_mask()
 
-
         try:
             for i in range(self.sample_len):
                 logits = self.inference.logits(tokens, audio_features, cross_attn_mask)
 
                 if (
-                    i == 0 and self.tokenizer.no_speech is not None
+                        i == 0 and self.tokenizer.no_speech is not None
                 ):  # save no_speech_probs
                     probs_at_sot = logits[:, self.sot_index].float().softmax(dim=-1)
                     no_speech_probs = probs_at_sot[:, self.tokenizer.no_speech].tolist()
@@ -798,7 +837,7 @@ class DecodingTask:
         # get the final candidates for each group, and slice between the first sampled token and EOT
         tokens, sum_logprobs = self.decoder.finalize(tokens, sum_logprobs)
         tokens: List[List[Tensor]] = [
-            [t[self.sample_begin : (t == tokenizer.eot).nonzero()[0, 0]] for t in s]
+            [t[self.sample_begin: (t == tokenizer.eot).nonzero()[0, 0]] for t in s]
             for s in tokens
         ]
 
@@ -842,10 +881,10 @@ class DecodingTask:
 
 @torch.no_grad()
 def decode(
-    model: "Whisper",
-    mel: Tensor,
-    options: DecodingOptions = DecodingOptions(),
-    **kwargs,
+        model: "Whisper",
+        mel: Tensor,
+        options: DecodingOptions = DecodingOptions(),
+        **kwargs,
 ) -> Union[DecodingResult, List[DecodingResult]]:
     """
     Performs decoding of 30-second audio segment(s), provided as Mel spectrogram(s).

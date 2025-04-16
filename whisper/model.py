@@ -52,7 +52,7 @@ class Linear(nn.Linear):
 
 class Conv1d(nn.Conv1d):
     def _conv_forward(
-        self, x: Tensor, weight: Tensor, bias: Optional[Tensor]
+            self, x: Tensor, weight: Tensor, bias: Optional[Tensor]
     ) -> Tensor:
         return super()._conv_forward(
             x, weight.to(x.dtype), None if bias is None else bias.to(x.dtype)
@@ -79,7 +79,7 @@ def disable_sdpa():
 
 
 class MultiHeadAttention(nn.Module):
-    use_sdpa = True
+    use_sdpa = False
 
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
@@ -90,11 +90,11 @@ class MultiHeadAttention(nn.Module):
         self.out = Linear(n_state, n_state)
 
     def forward(
-        self,
-        x: Tensor,
-        xa: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None,
-        kv_cache: Optional[dict] = None,
+            self,
+            x: Tensor,
+            xa: Optional[Tensor] = None,
+            mask: Optional[Tensor] = None,
+            kv_cache: Optional[dict] = None,
     ):
         q = self.query(x)
 
@@ -112,7 +112,7 @@ class MultiHeadAttention(nn.Module):
         return self.out(wv), qk
 
     def qkv_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
+            self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
@@ -124,10 +124,16 @@ class MultiHeadAttention(nn.Module):
 
             if mask is not None and mask.ndim == 2 and mask.size(0) != mask.size(1):
                 # convert all -inf to false and others to true
-                mask = mask != float("-inf")
+                # mask = mask != float("-inf")
+                # mask.shape = (1, 1500)
+                # to be compatible with the attention function, we need to expand it to (1, 3, 1500)
+                # real_mask = mask.clone().unsqueeze(1)
+                # real_mask = real_mask.expand(-1, 1, -1)
+
                 a = scaled_dot_product_attention(
-                    q, k, v, is_causal=mask is not None and n_ctx > 1, attn_mask=mask
+                    q, k, v, is_causal=False, attn_mask=mask
                 )
+
             else:
                 a = scaled_dot_product_attention(
                     q, k, v, is_causal=mask is not None and n_ctx > 1
@@ -141,13 +147,24 @@ class MultiHeadAttention(nn.Module):
             # and rectangular masks (e.g., cross-attention, shape: [n_ctx, n_audio_ctx])
             if mask is not None:
                 if mask.ndim == 2 and mask.size(0) != mask.size(1):
-                    qk = qk + mask.unsqueeze(0).unsqueeze(0)
+                    real_mask = mask.clone()
+                    # look at min max median values of qk to scale mask
+
+                    real_mask = real_mask.unsqueeze(0).unsqueeze(0)
+                    real_mask = real_mask.expand(-1, qk.shape[1], qk.shape[2], -1)
+                    qk = qk + real_mask
                 else:
                     # regular square mask
                     qk = qk + mask[:n_ctx, :n_ctx]
             qk = qk.float()
 
             w = F.softmax(qk, dim=-1).to(q.dtype)
+            # HEre nullen
+
+            if mask is not None and mask.ndim == 2 and mask.size(0) != mask.size(1):
+                real_mask = mask.clone()
+                # inf to 0 and others to 1
+
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = qk.detach()
 
@@ -172,16 +189,18 @@ class ResidualAttentionBlock(nn.Module):
         self.mlp_ln = LayerNorm(n_state)
 
     def forward(
-        self,
-        x: Tensor,
-        xa: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None,
-        cross_attn_mask: Optional[Tensor] = None,  # Neuer Parameter für Cross-Attention
-        kv_cache: Optional[dict] = None,
+            self,
+            x: Tensor,
+            xa: Optional[Tensor] = None,
+            mask: Optional[Tensor] = None,
+            cross_attn_mask: Optional[Tensor] = None,  # Neuer Parameter für Cross-Attention
+            kv_cache: Optional[dict] = None,
     ):
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
             # Hier wird die cross_attn_mask an die Cross-Attention weitergereicht.
+            # TODO: investigate if mask should be merged with cross_attn_mask
+
             x = x + self.cross_attn(
                 self.cross_attn_ln(x), xa, mask=cross_attn_mask, kv_cache=kv_cache
             )[0]
@@ -191,7 +210,7 @@ class ResidualAttentionBlock(nn.Module):
 
 class AudioEncoder(nn.Module):
     def __init__(
-        self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
+            self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
     ):
         super().__init__()
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
@@ -225,9 +244,10 @@ class AudioEncoder(nn.Module):
         x = self.ln_post(x)
         return x
 
+
 class TextDecoder(nn.Module):
     def __init__(
-        self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
+            self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
     ):
         super().__init__()
 
@@ -310,7 +330,7 @@ class Whisper(nn.Module):
         all_heads = torch.zeros(
             self.dims.n_text_layer, self.dims.n_text_head, dtype=torch.bool
         )
-        all_heads[self.dims.n_text_layer // 2 :] = True
+        all_heads[self.dims.n_text_layer // 2:] = True
         self.register_buffer("alignment_heads", all_heads.to_sparse(), persistent=False)
 
     def set_alignment_heads(self, dump: bytes):
@@ -329,7 +349,7 @@ class Whisper(nn.Module):
         return self.decoder(tokens, audio_features)
 
     def forward(
-        self, mel: torch.Tensor, tokens: torch.Tensor
+            self, mel: torch.Tensor, tokens: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
         return self.decoder(tokens, self.encoder(mel))
 

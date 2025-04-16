@@ -176,6 +176,7 @@ def transcribe(
     if len(seek_points) % 2 == 1:
         seek_points.append(content_frames)
     seek_clips: List[Tuple[int, int]] = list(zip(seek_points[::2], seek_points[1::2]))
+    print("Seek_clips", seek_clips)
 
     punctuation = "\"'“¿([{-\"'.。,，!！?？:：”)]}、"
 
@@ -234,8 +235,14 @@ def transcribe(
                 kwargs.pop("best_of", None)
 
             options = DecodingOptions(**kwargs, temperature=t, audio_masking_type="cross_attn",
-                                      voice_intervals=transcription_segments)
+                                      voice_intervals=transcription_segments, language="de")
             decode_result = model.decode(segment, options)
+
+            tokens = torch.tensor(decode_result.tokens)
+            tokens = tokens.tolist()
+            text_tokens = [token for token in tokens if token < tokenizer.eot]
+            print(f"Transcription-Segments: {transcription_segments}")
+            print(tokenizer.decode(text_tokens))
 
             needs_fallback = False
             if (
@@ -315,11 +322,21 @@ def transcribe(
                 if clip_idx < len(seek_clips):
                     seek = seek_clips[clip_idx][0]
                 continue
+            print(seek)
+
             time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
             window_end_time = float((seek + N_FRAMES) * HOP_LENGTH / SAMPLE_RATE)
+
             segment_size = min(N_FRAMES, content_frames - seek, seek_clip_end - seek)
             mel_segment = mel[:, seek: seek + segment_size]
             segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
+
+            # Calculate padding amount
+            padding_frames = N_FRAMES - segment_size
+            padding_seconds = padding_frames * HOP_LENGTH / SAMPLE_RATE
+            print(f"Padding added: {padding_seconds:.3f} seconds")
+
+            # Pad or trim
             mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
 
             if carry_initial_prompt:
