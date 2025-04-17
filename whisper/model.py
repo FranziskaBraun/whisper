@@ -7,6 +7,7 @@ from typing import Dict, Iterable, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from matplotlib.cbook import silent_list
 from torch import Tensor, nn
 
 from .decoding import decode as decode_function
@@ -86,7 +87,7 @@ def disable_sdpa():
 
 
 class MultiHeadAttention(nn.Module):
-    use_sdpa = False
+    use_sdpa = True
 
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
@@ -126,22 +127,15 @@ class MultiHeadAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
-        q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
-        k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
+        q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)  # Self Attn shape: 1, 12, 1500, 64
+        k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)  # Self Attn shape: 1, 12, 1500, 64
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
         if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa:
 
-            if mask is not None and mask.ndim == 2 and mask.size(0) != mask.size(1):
-                # convert all -inf to false and others to true
-                # mask = mask != float("-inf")
-                # mask.shape = (1, 1500)
-                # to be compatible with the attention function, we need to expand it to (1, 3, 1500)
-                # real_mask = mask.clone().unsqueeze(1)
-                # real_mask = real_mask.expand(-1, 1, -1)
-
+            if cross_mask is not None:
                 a = scaled_dot_product_attention(
-                    q, k, v, is_causal=False, attn_mask=mask
+                    q, k, v, is_causal=False, attn_mask=cross_mask.unsqueeze(0).unsqueeze(0)
                 )
 
             else:
@@ -152,6 +146,7 @@ class MultiHeadAttention(nn.Module):
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = None
         else:
+
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
 
             if mask is not None:
@@ -161,7 +156,8 @@ class MultiHeadAttention(nn.Module):
 
             qk = qk.float()
 
-            w = F.softmax(qk, dim=-1).to(q.dtype)
+            w = F.softmax(qk, dim=-1).to(
+                q.dtype)  # shape after encoder-self attention mask 1,1,12,1500,1500 -> soll aber 1,12,1500,1500 sein
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = qk.detach()
 
@@ -173,13 +169,11 @@ class MultiHeadAttention(nn.Module):
                 if rec is not None:
                     rec.add(layer, w_mean[0])
 
-                if True:
+                if False:
                     import matplotlib.pyplot as plt
 
                     # w hat Shape [batch, n_head, T_dec, T_enc].
                     # Wir wollen über n_head mitteln:
-                    w_mean = w.mean(dim=1)  # => [batch, T_dec, T_enc]
-
                     plt.figure(figsize=(12, 8))
                     # Wir nehmen batch=0 und plotten. Y => T_dec, X => T_enc
 
@@ -252,12 +246,12 @@ class AudioEncoder(nn.Module):
         x = x.permute(0, 2, 1)
         x = (x + self.positional_embedding).to(x.dtype)
 
-        if silence_mask is not None:
+        if silence_mask is None:
             # Konvertiere den boolean-Masken-Vektor in eine Maske mit -inf für stumm
             # und erweitere die Dimension für die Addierung zu den Attention-Scores.
-            mask = silence_mask.float().masked_fill(silence_mask, float('-inf')).unsqueeze(1)
-        else:
             mask = None
+        else:
+            mask = silence_mask
 
         for block in self.blocks:
             x = block(x, mask=mask)

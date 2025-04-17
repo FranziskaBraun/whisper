@@ -678,25 +678,47 @@ class DecodingTask:
 
         return languages, lang_probs
 
-    def get_encoder_silence_mask(self, n_audio_ctx: int, n_audio: int) -> Optional[Tensor]:
+    def get_encoder_silence_mask(
+            self,
+            n_audio_ctx: int,
+            n_audio: int
+    ) -> Optional[torch.Tensor]:
         """
-        Generates a boolean mask of shape (n_audio, n_audio_ctx), where True indicates silent frames.
-        If voice_intervals are not set, returns None.
+        Gibt eine boolesche Self‑Attention‑Maske zurück.
+        shape: (n_audio, 1, n_audio_ctx, n_audio_ctx)
+        True = darf *nicht* attendieren  (Stille)
+        False = darf attendieren        (Speech)
         """
         if self.options.voice_intervals is None:
             return None
-        # Create a mask for each audio input, initially marking all frames as silent.
-        mask = torch.ones((n_audio, n_audio_ctx), dtype=torch.bool, device=self.model.device)
-        # Assume the total audio duration is 30 seconds (30000ms).
-        # The scale factor maps n_audio_ctx frames to the total duration.
-        scale = n_audio_ctx / 30000.0
-        for (start, end) in self.options.voice_intervals:
-            s = int(max(0, start * scale))
-            e = int(min(n_audio_ctx, end * scale))
+
+        # 1) Frame‑Maske (batch, T)
+        mask = torch.full(
+            (n_audio, n_audio_ctx),
+            fill_value=-1e9,
+            dtype=torch.float,
+            device=self.model.device,
+        )
+
+        # Audio‑Länge 30 000 ms  ⇒ Skalierungsfaktor für Frames
+        scale = n_audio_ctx / 30_000.0
+        for (start_ms, end_ms) in self.options.voice_intervals:
+            s = int(max(0, start_ms * scale))
+            e = int(min(n_audio_ctx, end_ms * scale))
             if s < e:
-                # Within the specified intervals: mark frames as containing speech (not silent).
-                mask[:, s:e] = False
-        return mask
+                mask[:, s:e] = 0  # hier liegt Sprache vor
+
+        # 2) Quadratisch machen:
+        # Ein Frame i darf j nicht sehen, wenn i **oder** j Stille ist  (OR).
+        #   mask[:, None, :] : (batch, 1, T)
+        #   mask[:, :, None] : (batch, T, 1)
+        # Combine to 2D mask: speech-speech pairs 0, any silence -1e9
+        mask_sq = torch.min(mask[:, None, :], mask[:, :, None])  # (batch, T, T)
+
+        # 3) Für Multi‑Head‑Attention noch einen "heads"‑dummy einschieben (broadcastbar):
+        mask_sq = mask_sq.unsqueeze(1)  # (batch, 1, T, T)
+
+        return mask_sq
 
     def get_cross_attn_mask(self, smooth=False) -> Optional[torch.Tensor]:
         """
@@ -792,7 +814,7 @@ class DecodingTask:
 
                 # expand the tokens tensor with the selected next tokens
                 tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
-                print([tokenizer.decode(t).strip() for t in tokens])
+                # print([tokenizer.decode(t).strip() for t in tokens])
 
                 if completed or tokens.shape[-1] > self.n_ctx:
                     break
@@ -917,8 +939,26 @@ def decode(
 
     from .attn_recorder import get_recorder
     rec = get_recorder()
-    if rec is not None:
-        rec.save()
-    # -------------------------
+    if rec is not None and len(rec.frames[0]) != 0:
+        # `result` ist entweder eine Liste von DecodingResult oder ein einzelnes Objekt
+        first_result = result[0] if isinstance(result, list) else result
+        # Token‑IDs der finalen Hypothese
+        token_ids: List[int] = first_result.tokens
+
+        # Tokenizer rekonstruieren, damit decode() identisch arbeitet
+
+        # 2) Tokenizer rekonstruieren (gleiche Sprache + Task)
+        tokenizer = get_tokenizer(
+            model.is_multilingual,
+            num_languages=model.num_languages,
+            language=first_result.language,  # erkannte Sprache
+            task=options.task,
+        )
+
+        # 3) Klartext‑Strings bauen
+        token_strings = [tokenizer.decode([tid]) for tid in token_ids]  # + ["<|endoftext|>"]
+
+        # 4) HTML‑Speicherung
+        rec.save_html(token_strings)
 
     return result[0] if single else result
