@@ -53,6 +53,7 @@ def transcribe(
         clip_timestamps: Union[str, List[float]] = "0",
         hallucination_silence_threshold: Optional[float] = None,
         transcription_intervals: Optional[List[Tuple[int, int]]] = None,
+        min_transcription_interval_last_segment: int = 500,
         **decode_options,
 ):
     """
@@ -234,9 +235,12 @@ def transcribe(
                 # disable best_of when t == 0
                 kwargs.pop("best_of", None)
 
-            options = DecodingOptions(**kwargs, temperature=t, audio_masking_type="cross_attn",
+            options = DecodingOptions(**kwargs, temperature=t, audio_masking_type="encoder_attn",
                                       voice_intervals=transcription_segments)
             decode_result = model.decode(segment, options)
+
+            # text_tokens = tokenizer.decode(decode_result.tokens)
+            # print(text_tokens)
 
             needs_fallback = False
             if (
@@ -316,12 +320,14 @@ def transcribe(
                 if clip_idx < len(seek_clips):
                     seek = seek_clips[clip_idx][0]
                 continue
-            print(seek)
+            # print(seek)
 
             time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
             window_end_time = float((seek + N_FRAMES) * HOP_LENGTH / SAMPLE_RATE)
 
             segment_size = min(N_FRAMES, content_frames - seek, seek_clip_end - seek)
+            # print(f"Segment-Start: {seek}, Segment-End: {seek + segment_size}, ")
+
             mel_segment = mel[:, seek: seek + segment_size]
             segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
 
@@ -349,6 +355,12 @@ def transcribe(
                     chunk_start_ms,
                     chunk_end_ms
                 )
+                if len(relevant_intervals) == 1 and (abs(
+                        relevant_intervals[0][0] - relevant_intervals[0][1]) < min_transcription_interval_last_segment):
+                    # no relevant intervals, skip this chunk
+                    seek += segment_size
+                    continue
+
                 if len(relevant_intervals) == 0:
                     # no relevant intervals, skip this chunk
                     seek += segment_size

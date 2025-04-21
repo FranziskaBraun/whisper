@@ -116,6 +116,9 @@ class DecodingOptions:
     voice_intervals: Optional[List[Tuple[int, int]]] = None
     audio_masking_type: Literal["encoder_attn", "cross_attn", "both"] = "encoder_attn"
 
+    # Auf welche Layer soll Maskierung angewendet werden im Decoder
+    decoder_masking_layers: Optional[List[int]] = None
+
 
 @dataclass(frozen=True)
 class DecodingResult:

@@ -104,6 +104,7 @@ class MultiHeadAttention(nn.Module):
             mask: Optional[Tensor] = None,
             kv_cache: Optional[dict] = None,
             cross_mask: Optional[Tensor] = None,
+            encoder_mask: Optional[Tensor] = None,
             layer: Optional[int] = None,
     ):
         q = self.query(x)
@@ -118,73 +119,86 @@ class MultiHeadAttention(nn.Module):
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask, layer=layer)
+        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask, encoder_mask=encoder_mask, layer=layer)
         return self.out(wv), qk
 
     def qkv_attention(
-            self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None, cross_mask: Optional[Tensor] = None,
-            layer: Optional[int] = None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+            self,
+            q: Tensor,
+            k: Tensor,
+            v: Tensor,
+            mask: Optional[Tensor] = None,
+            cross_mask: Optional[Tensor] = None,
+            encoder_mask: Optional[Tensor] = None,
+            layer: Optional[int] = None,
+            masking: str = "qk",
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
-        q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)  # Self Attn shape: 1, 12, 1500, 64
-        k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)  # Self Attn shape: 1, 12, 1500, 64
+        q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
+        k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
-        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa:
+        # ============ 1) Key‑Maskierung ====================================
+        if masking == "k":
 
+            if cross_mask is not None:  # -------- Cross -------
+                key_block = cross_mask[0] == float("-inf")  # (T_enc,)
+                k = k.masked_fill(key_block[None, None, :, None], 0)
+
+            elif encoder_mask is not None:  # -------- Self --------
+                B, H, T_k, D = k.shape
+
+                key_block = encoder_mask == .0
+                key_block = key_block.any(dim=-1, keepdim=True)
+                # invert mask
+                key_block = key_block.logical_not()
+                # reduce mask from shape 1,1,1500, 1500 to 1,1,1500,1 for masking k
+                k = k.masked_fill(key_block, 0.0)
+
+        # ============ 2) Aufmerksamkeit berechnen ==========================
+        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and masking == "qk":
             if cross_mask is not None:
                 a = scaled_dot_product_attention(
-                    q, k, v, is_causal=False, attn_mask=cross_mask.unsqueeze(0).unsqueeze(0)
+                    q, k, v, is_causal=False,
+                    attn_mask=cross_mask.unsqueeze(0).unsqueeze(0)
                 )
-
+            elif encoder_mask is not None:
+                a = scaled_dot_product_attention(
+                    q, k, v, is_causal=False,
+                    attn_mask=encoder_mask[:n_ctx, :n_ctx]
+                )
             else:
                 a = scaled_dot_product_attention(
                     q, k, v, is_causal=mask is not None and n_ctx > 1
                 )
-
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
-            qk = None
+            qk_scores = None
+
         else:
+            qk_scores = (q * scale) @ (k * scale).transpose(-1, -2)
 
-            qk = (q * scale) @ (k * scale).transpose(-1, -2)
+            if masking == "qk":
+                if mask is not None:
+                    qk_scores = qk_scores + mask[:n_ctx, :n_ctx]
+                if cross_mask is not None:
+                    qk_scores = qk_scores + cross_mask.unsqueeze(0).unsqueeze(0)
 
-            if mask is not None:
-                qk = qk + mask[:n_ctx, :n_ctx]
-            if cross_mask is not None:
-                qk = qk + cross_mask.unsqueeze(0).unsqueeze(0)
+                elif encoder_mask is not None:
+                    qk_scores = qk_scores + encoder_mask[:n_ctx, :n_ctx]
 
-            qk = qk.float()
-
-            w = F.softmax(qk, dim=-1).to(
-                q.dtype)  # shape after encoder-self attention mask 1,1,12,1500,1500 -> soll aber 1,12,1500,1500 sein
+            qk_scores = qk_scores.float()
+            w = F.softmax(qk_scores, dim=-1).to(q.dtype)
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
-            qk = qk.detach()
 
-            if cross_mask is not None and layer is not None and n_batch == 1:
-                w_mean = w.mean(dim=1)  # -> (batch, T_dec, T_enc)
-
+            if layer is not None and n_batch == 1:
                 from .attn_recorder import get_recorder
                 rec = get_recorder()
                 if rec is not None:
-                    rec.add(layer, w_mean[0])
+                    rec.add(layer, w.mean(dim=1)[0])
 
-                if False:
-                    import matplotlib.pyplot as plt
-
-                    # w hat Shape [batch, n_head, T_dec, T_enc].
-                    # Wir wollen über n_head mitteln:
-                    plt.figure(figsize=(12, 8))
-                    # Wir nehmen batch=0 und plotten. Y => T_dec, X => T_enc
-
-                    plt.imshow(w_mean[0].cpu().numpy(), aspect='auto', origin='lower')
-                    plt.title(f"Cross-Attention Layer {layer} (Heads gemittelt)")
-                    plt.xlabel("Encoder-Positionen")
-                    plt.ylabel("Decoder-Positionen")
-                    plt.colorbar()
-                    plt.show()
-
-        return out, qk
+        return out, qk_scores
 
 
 class ResidualAttentionBlock(nn.Module):
@@ -210,10 +224,11 @@ class ResidualAttentionBlock(nn.Module):
             xa: Optional[Tensor] = None,
             mask: Optional[Tensor] = None,
             cross_attn_mask: Optional[Tensor] = None,  # Neuer Parameter für Cross-Attention
+            encoder_mask: Optional[Tensor] = None,
             kv_cache: Optional[dict] = None,
             layer: Optional[int] = None,
     ):
-        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
+        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache, encoder_mask=encoder_mask)[0]
         if self.cross_attn:
             x = x + self.cross_attn(
                 self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_attn_mask, layer=layer
@@ -254,7 +269,7 @@ class AudioEncoder(nn.Module):
             mask = silence_mask
 
         for block in self.blocks:
-            x = block(x, mask=mask)
+            x = block(x, encoder_mask=mask)
         x = self.ln_post(x)
         return x
 
