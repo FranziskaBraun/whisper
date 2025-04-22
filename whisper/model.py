@@ -106,6 +106,7 @@ class MultiHeadAttention(nn.Module):
             cross_mask: Optional[Tensor] = None,
             encoder_mask: Optional[Tensor] = None,
             layer: Optional[int] = None,
+            heads_to_mask: Optional[List[int]] = None,
     ):
         q = self.query(x)
 
@@ -119,7 +120,8 @@ class MultiHeadAttention(nn.Module):
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask, encoder_mask=encoder_mask, layer=layer)
+        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask, encoder_mask=encoder_mask, layer=layer,
+                                    heads_to_mask=heads_to_mask)
         return self.out(wv), qk
 
     def qkv_attention(
@@ -132,66 +134,57 @@ class MultiHeadAttention(nn.Module):
             encoder_mask: Optional[Tensor] = None,
             layer: Optional[int] = None,
             masking: str = "qk",
+            heads_to_mask: Optional[List[int]] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
 
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
-        q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
-        k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
-        v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
+        q = q.view(n_batch, n_ctx, self.n_head, -1).permute(0, 2, 1, 3)  # (B, heads, T_q, D)
+        k = k.view(n_batch, k.shape[1], self.n_head, -1).permute(0, 2, 1, 3)  # (B, heads, T_k, D)
+        v = v.view(n_batch, v.shape[1], self.n_head, -1).permute(0, 2, 1, 3)  # (B, heads, T_k, D)
 
-        # ============ 1) Key‑Maskierung ====================================
-        if masking == "k":
+        # Default: No masking
+        effective_mask = None
 
-            if cross_mask is not None:  # -------- Cross -------
-                key_block = cross_mask[0] == float("-inf")  # (T_enc,)
-                k = k.masked_fill(key_block[None, None, :, None], 0)
-
-            elif encoder_mask is not None:  # -------- Self --------
-                B, H, T_k, D = k.shape
-
-                key_block = encoder_mask == .0
-                key_block = key_block.any(dim=-1, keepdim=True)
-                # invert mask
-                key_block = key_block.logical_not()
-                # reduce mask from shape 1,1,1500, 1500 to 1,1,1500,1 for masking k
-                k = k.masked_fill(key_block, 0.0)
-
-        # ============ 2) Aufmerksamkeit berechnen ==========================
-        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and masking == "qk":
+        if masking == "qk":
             if cross_mask is not None:
-                a = scaled_dot_product_attention(
-                    q, k, v, is_causal=False,
-                    attn_mask=cross_mask.unsqueeze(0).unsqueeze(0)
-                )
+                effective_mask = cross_mask.unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
             elif encoder_mask is not None:
-                a = scaled_dot_product_attention(
-                    q, k, v, is_causal=False,
-                    attn_mask=encoder_mask[:n_ctx, :n_ctx]
-                )
-            else:
-                a = scaled_dot_product_attention(
-                    q, k, v, is_causal=mask is not None and n_ctx > 1
-                )
+                effective_mask = encoder_mask[:n_ctx, :n_ctx]  # # .unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
+            elif mask is not None:
+                effective_mask = mask[:n_ctx, :n_ctx]  # .unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_q)
+
+            if effective_mask is not None and heads_to_mask is not None:
+                # Create a zero-mask tensor of shape (1, heads, 1, 1)
+                head_mask = torch.zeros((1, self.n_head, 1, 1), device=q.device, dtype=q.dtype)
+                # Set only specified heads to 1.0 (masked heads)
+                head_mask[:, heads_to_mask, :, :] = 1.0
+                # Multiply mask by head-mask: masked heads get original mask, others get zero
+                effective_mask = effective_mask * head_mask
+                # replace nan values with 0
+                effective_mask = torch.nan_to_num(effective_mask, nan=0.0)
+
+            # Heads not in heads_to_mask will have no mask applied (mask=0 means no effect)
+
+        # Compute scaled dot product attention
+        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and masking == "qk":
+            attn_mask = effective_mask.to(q.dtype) if effective_mask is not None else None
+            a = scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=attn_mask)
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk_scores = None
 
         else:
+            # Compute qk scores manually
             qk_scores = (q * scale) @ (k * scale).transpose(-1, -2)
 
-            if masking == "qk":
-                if mask is not None:
-                    qk_scores = qk_scores + mask[:n_ctx, :n_ctx]
-                if cross_mask is not None:
-                    qk_scores = qk_scores + cross_mask.unsqueeze(0).unsqueeze(0)
-
-                elif encoder_mask is not None:
-                    qk_scores = qk_scores + encoder_mask[:n_ctx, :n_ctx]
+            if effective_mask is not None:
+                qk_scores = qk_scores + effective_mask
 
             qk_scores = qk_scores.float()
             w = F.softmax(qk_scores, dim=-1).to(q.dtype)
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
 
+            # Optional: attention recording
             if layer is not None and n_batch == 1:
                 from .attn_recorder import get_recorder
                 rec = get_recorder()
@@ -227,11 +220,15 @@ class ResidualAttentionBlock(nn.Module):
             encoder_mask: Optional[Tensor] = None,
             kv_cache: Optional[dict] = None,
             layer: Optional[int] = None,
+            encoder_heads_to_mask: Optional[List[int]] = None,
+            decoder_heads_to_mask: Optional[List[int]] = None,
     ):
-        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache, encoder_mask=encoder_mask)[0]
+        x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache, encoder_mask=encoder_mask,
+                          heads_to_mask=encoder_heads_to_mask)[0]
         if self.cross_attn:
             x = x + self.cross_attn(
-                self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_attn_mask, layer=layer
+                self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_attn_mask, layer=layer,
+                heads_to_mask=decoder_heads_to_mask
             )[0]
         x = x + self.mlp(self.mlp_ln(x))
         return x
@@ -242,6 +239,8 @@ class AudioEncoder(nn.Module):
             self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
     ):
         super().__init__()
+        self.n_head = n_head
+
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
         self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
@@ -251,7 +250,8 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x: Tensor, silence_mask: Optional[Tensor] = None, masking_layers: Optional[List[int]] = None):
+    def forward(self, x: Tensor, silence_mask: Optional[Tensor] = None, masking_layers: Optional[List[int]] = None,
+                heads_to_mask_dict: Optional[Dict[int, List[int]]] = None):
         """
         x: Tensor of shape (batch, n_mels, n_ctx)
         silence_mask: Optional[Tensor] of shape (batch, n_ctx) with True für stumme Frames
@@ -270,10 +270,14 @@ class AudioEncoder(nn.Module):
 
         for idx, block in enumerate(self.blocks):
             tmp = mask
+            heads_to_mask = range(0, self.n_head)
             if masking_layers is None or idx not in masking_layers:
                 tmp = None
+                heads_to_mask = None
+            elif heads_to_mask_dict is not None:
+                heads_to_mask = heads_to_mask_dict.get(idx)
 
-            x = block(x, encoder_mask=tmp)
+            x = block(x, encoder_mask=tmp, encoder_heads_to_mask=heads_to_mask)
         x = self.ln_post(x)
         return x
 
@@ -283,6 +287,7 @@ class TextDecoder(nn.Module):
             self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
     ):
         super().__init__()
+        self.n_head = n_head
 
         self.token_embedding = nn.Embedding(n_vocab, n_state)
         self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
@@ -305,6 +310,7 @@ class TextDecoder(nn.Module):
             kv_cache: Optional[dict] = None,
             cross_attn_mask: Optional[Tensor] = None,  # Übergabeparameter für Cross-Attention-Maskierung
             masking_layers: Optional[List[int]] = None,
+            heads_to_mask_dict: Optional[Dict[int, List[int]]] = None,
     ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
@@ -326,8 +332,12 @@ class TextDecoder(nn.Module):
         # Übergabe der self-attention Maske (quadratisch) und der Cross-Attention Maske an alle Blöcke.
         for idx, block in enumerate(self.blocks):
             tmp = cross_attn_mask
+            heads_to_mask = list(range(self.n_head))
             if masking_layers is None or idx not in masking_layers:
                 tmp = None
+                heads_to_mask = None
+            elif heads_to_mask_dict is not None:
+                heads_to_mask = heads_to_mask_dict.get(idx)
 
             x = block(
                 x,
@@ -336,6 +346,7 @@ class TextDecoder(nn.Module):
                 cross_attn_mask=tmp,
                 kv_cache=kv_cache,
                 layer=idx,
+                decoder_heads_to_mask=heads_to_mask
             )
 
         x = self.ln(x)
