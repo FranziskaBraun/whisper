@@ -14,7 +14,7 @@ class AttentionRecorder:
     Plotly visualisation **including an averaged “ALL” layer**.
 
     A single call of :py:meth:`add` receives the mean–over–heads cross–attention
-    matrix of shape *(T_dec, T_enc)*.  We store only the **last decoder row**
+    matrix of shape *(T_dec,T_enc)*.  We store only the **last decoder row**
     (i.e. the token that has just been generated).  That keeps the HTML file
     small while still showing which encoder positions each new token attends
     to.
@@ -30,10 +30,10 @@ class AttentionRecorder:
     # Data collection ------------------------------------------------------
     # ---------------------------------------------------------------------
     def add(self, layer: int, attn: torch.Tensor):
-        """Record the last decoder row of *attn* (shape (T_dec, T_enc))."""
+        """Record the last decoder row of *attn* (shape (T_dec,T_enc))."""
         a = attn.float()
         a = (a - a.min()) / (a.max() - a.min() + 1e-5)
-        last_row = a[-1:].cpu().numpy()  # shape (1, T_enc)
+        last_row = a[-1:].cpu().numpy()  # shape (1,T_enc)
         self.frames[layer].append(last_row)
 
     # ---------------------------------------------------------------------
@@ -49,7 +49,7 @@ class AttentionRecorder:
             *n_layers*.
         n_steps     : int     – number of decoder steps (time axis)
         max_dec     : int     – equals *n_steps* (one row per token)
-        n_enc       : int     – encoder length (usually 1500)
+        n_enc       : int     – encoder length (usually1500)
         """
         if not any(self.frames):
             raise RuntimeError("[AttentionRecorder] no data collected – call add() first")
@@ -75,76 +75,55 @@ class AttentionRecorder:
         tensor_all = np.concatenate([tensor, avg_tensor], axis=0)  # (L+1, …)
         return tensor_all, n_steps, max_dec, n_enc
 
-    def _make_slider(self, layer_idx: int, tensor: np.ndarray, tokens_pad: list[str]) -> dict:
-        """Return a *single* Plotly slider object for *layer_idx*."""
-        n_steps = tensor.shape[1]
-        max_dec = tensor.shape[2]
-        steps = []
-        for t in range(n_steps):
-            ticktext_t = tokens_pad[:t + 1] + [""] * (max_dec - (t + 1))
-            steps.append({
-                "label": str(t),
-                "method": "update",
-                "args": [
-                    {"z": [tensor[layer_idx, t]]},
-                    {"yaxis.ticklext": ticktext_t,
-                     "title": f"Cross‑Attention • Layer {('ALL' if layer_idx == tensor.shape[0] - 1 else layer_idx)} • t = {t}"}
-                ],
-            })
-        return {
-            "active": 0,
-            "pad": {"t": 55},
-            "currentvalue": {"prefix": "Decoder‑Run t = "},
-            "steps": steps,
-        }
-
-    def save_html(self, tokens_text: list[str], filename: str = "attention_interactive.html", row_px: int = 22):
-        """Write an interactive HTML file next to the Python script."""
+    def save_html(
+            self,
+            tokens_text: list[str],
+            filename: str = "attention_interactive.html",
+            row_px: int = 22,
+    ):
+        """Schreibt ein interaktives HTML ohne Zeit‑Slider (alles t‑auf einmal)."""
         tensor_all, n_steps, max_dec, n_enc = self._build_tensor()
         n_layers_all = tensor_all.shape[0]
 
+        # y‑Beschriftungen auf volle Decoder‑Länge auffüllen
         tokens_pad = tokens_text + [tokens_text[-1]] * max(0, max_dec - len(tokens_text))
 
         # ------------------------------------------------------------------
-        # initial figure (layer 0, t = 0) ----------------------------------
+        # Initiale Figur – wir zeigen gleich t = n_steps‑1
         # ------------------------------------------------------------------
+        t_last = n_steps - 1
         fig = go.Figure()
-        fig.add_trace(go.Heatmap(z=tensor_all[0, 0], colorscale="Viridis", zmin=0, zmax=1,
-                                 colorbar=dict(title="Attention")))
+        fig.add_trace(go.Heatmap(
+            z=tensor_all[0, t_last],  # vollständige Matrix
+            colorscale="Viridis",
+            zmin=0, zmax=1,
+            colorbar=dict(title="Attention"),
+        ))
 
         fig.update_layout(
             height=140 + row_px * max_dec,
-            xaxis=dict(title=f"Encoder‑Token (0…{n_enc - 1})"),
+            xaxis=dict(title=f"Encoder‑Token(0…{n_enc - 1})"),
             yaxis=dict(title="Decoder‑Token",
                        tickmode="array",
                        tickvals=list(range(max_dec)),
                        ticktext=tokens_pad,
                        autorange="reversed"),
-            title="Cross‑Attention • Layer 0 • t = 0",
+            title=f"Cross‑Attention • Layer0 • allet(0…{t_last})",
             autosize=True,
         )
 
         # ------------------------------------------------------------------
-        # sliders (one per layer, switched by dropdown) --------------------
-        # ------------------------------------------------------------------
-        sliders = [self._make_slider(0, tensor_all, tokens_pad)]
-        fig.update_layout(sliders=sliders)
-
-        # ------------------------------------------------------------------
-        # dropdown to switch layer (incl. averaged "ALL") -----------------
+        # Dropdown zum Umschalten der Layer (inkl. „ALL“)
         # ------------------------------------------------------------------
         buttons = []
         for l in range(n_layers_all):
-            label = "ALL" if l == n_layers_all - 1 else f"Layer {l}"
+            label = "ALL" if l == n_layers_all - 1 else f"Layer{l}"
             buttons.append({
                 "label": label,
                 "method": "update",
                 "args": [
-                    {"z": [tensor_all[l, 0]]},
-                    {
-                        "title": f"Cross‑Attention • {label} • t = 0",
-                        "sliders": [self._make_slider(l, tensor_all, tokens_pad)],
-                    },
+                    {"z": [tensor_all[l, t_last]]},  # vollständige Matrix
+                    {"title": f"Cross‑Attention • {label} • allet(0…{t_last})"},
                 ],
             })
 
@@ -159,11 +138,12 @@ class AttentionRecorder:
         )
 
         # ------------------------------------------------------------------
-        # export -----------------------------------------------------------
+        # Export
         # ------------------------------------------------------------------
         out_path = self.out_dir / filename
         fig.write_html(out_path, include_plotlyjs="cdn", config={"responsive": True})
         print(f"[AttentionRecorder] wrote {out_path}")
+        self.frames = [[] for _ in range(len(self.frames))]  # reset for next run
 
     # ---------------------------------------------------------------------
     # (optional) MP4 writer – unchanged from the original version ----------

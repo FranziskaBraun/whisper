@@ -251,7 +251,7 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x: Tensor, silence_mask: Optional[Tensor] = None):
+    def forward(self, x: Tensor, silence_mask: Optional[Tensor] = None, masking_layers: Optional[List[int]] = None):
         """
         x: Tensor of shape (batch, n_mels, n_ctx)
         silence_mask: Optional[Tensor] of shape (batch, n_ctx) with True für stumme Frames
@@ -268,8 +268,12 @@ class AudioEncoder(nn.Module):
         else:
             mask = silence_mask
 
-        for block in self.blocks:
-            x = block(x, encoder_mask=mask)
+        for idx, block in enumerate(self.blocks):
+            tmp = mask
+            if masking_layers is None or idx not in masking_layers:
+                tmp = None
+
+            x = block(x, encoder_mask=tmp)
         x = self.ln_post(x)
         return x
 
@@ -300,6 +304,7 @@ class TextDecoder(nn.Module):
             xa: Tensor,
             kv_cache: Optional[dict] = None,
             cross_attn_mask: Optional[Tensor] = None,  # Übergabeparameter für Cross-Attention-Maskierung
+            masking_layers: Optional[List[int]] = None,
     ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
@@ -320,12 +325,15 @@ class TextDecoder(nn.Module):
 
         # Übergabe der self-attention Maske (quadratisch) und der Cross-Attention Maske an alle Blöcke.
         for idx, block in enumerate(self.blocks):
-            # print(f"Layer {idx + 1} of {len(self.blocks)}")
+            tmp = cross_attn_mask
+            if masking_layers is None or idx not in masking_layers:
+                tmp = None
+
             x = block(
                 x,
                 xa,
                 mask=self.mask,
-                cross_attn_mask=cross_attn_mask,
+                cross_attn_mask=tmp,
                 kv_cache=kv_cache,
                 layer=idx,
             )

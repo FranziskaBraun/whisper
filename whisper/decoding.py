@@ -118,6 +118,7 @@ class DecodingOptions:
 
     # Auf welche Layer soll Maskierung angewendet werden im Decoder
     decoder_masking_layers: Optional[List[int]] = None
+    encoder_masking_layers: Optional[List[int]] = None
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,8 @@ class DecodingResult:
 
 
 class Inference:
-    def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Tensor) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Tensor,
+               masking_layers: Optional[List[int]]) -> Tensor:
         """Perform a forward pass on the decoder and return per-token logits"""
         raise NotImplementedError
 
@@ -158,7 +160,8 @@ class PyTorchInference(Inference):
         value_modules = [block.attn.value for block in self.model.decoder.blocks]
         self.kv_modules = key_modules + value_modules
 
-    def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Optional[Tensor]) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Optional[Tensor],
+               masking_layers: Optional[List[int]]) -> Tensor:
         if not self.kv_cache:
             self.kv_cache, self.hooks = self.model.install_kv_cache_hooks()
 
@@ -166,7 +169,8 @@ class PyTorchInference(Inference):
             # only need to use the last token except in the first forward pass
             tokens = tokens[:, -1:]
 
-        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache, cross_attn_mask=cross_attn_mask)
+        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache, cross_attn_mask=cross_attn_mask,
+                                  masking_layers=masking_layers)
 
     def cleanup_caching(self):
         for hook in self.hooks:
@@ -656,7 +660,8 @@ class DecodingTask:
 
             if self.options.audio_masking_type in ("encoder_attn", "both"):
                 silence_mask = self.get_encoder_silence_mask(self.model.dims.n_audio_ctx, mel.shape[0])
-            audio_features = self.model.encoder(mel, silence_mask=silence_mask)
+            audio_features = self.model.encoder(mel, silence_mask=silence_mask,
+                                                masking_layers=self.options.encoder_masking_layers)
         else:
             audio_features = mel
 
@@ -800,7 +805,8 @@ class DecodingTask:
         try:
             for i in range(self.sample_len):
                 # print(f"Logit round: {i}")
-                logits = self.inference.logits(tokens, audio_features, cross_attn_mask)
+                logits = self.inference.logits(tokens, audio_features, cross_attn_mask,
+                                               self.options.decoder_masking_layers)
 
                 if (
                         i == 0 and self.tokenizer.no_speech is not None
@@ -962,6 +968,6 @@ def decode(
         token_strings = [tokenizer.decode([tid]) for tid in token_ids]  # + ["<|endoftext|>"]
 
         # 4) HTML‑Speicherung
-        rec.save_html(token_strings)
+        rec.save_html(token_strings, filename=f"{options.audio_masking_type}_{options.decoder_masking_layers}.html")
 
     return result[0] if single else result
