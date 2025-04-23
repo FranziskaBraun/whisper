@@ -2,7 +2,7 @@ import argparse
 import os
 import traceback
 import warnings
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union, Literal
 
 import numpy as np
 import torch
@@ -52,8 +52,15 @@ def transcribe(
         append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
         clip_timestamps: Union[str, List[float]] = "0",
         hallucination_silence_threshold: Optional[float] = None,
+
+        mask_type: Literal[
+            "encoder_attn", "cross_attn", "both"] = "cross_mask",
+        decoder_masking_layers: Optional[List[int]] = None,
+        encoder_masking_layers: Optional[List[int]] = None,
+
         transcription_intervals: Optional[List[Tuple[int, int]]] = None,
         min_transcription_interval_last_segment: int = 500,
+
         **decode_options,
 ):
     """
@@ -235,8 +242,12 @@ def transcribe(
                 # disable best_of when t == 0
                 kwargs.pop("best_of", None)
 
-            options = DecodingOptions(**kwargs, temperature=t, audio_masking_type="encoder_attn",
-                                      voice_intervals=transcription_segments)
+            options = DecodingOptions(**kwargs, temperature=t,
+                                      voice_intervals=transcription_segments,
+                                      audio_masking_type=mask_type,
+                                      decoder_masking_layers=decoder_masking_layers,
+                                      encoder_masking_layers=encoder_masking_layers,
+                                      )
             decode_result = model.decode(segment, options)
 
             # text_tokens = tokenizer.decode(decode_result.tokens)

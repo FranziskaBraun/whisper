@@ -150,9 +150,9 @@ class MultiHeadAttention(nn.Module):
             if cross_mask is not None:
                 effective_mask = cross_mask.unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
             elif encoder_mask is not None:
-                effective_mask = encoder_mask[:n_ctx, :n_ctx]  # # .unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
+                effective_mask = encoder_mask[:n_ctx, :n_ctx].unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
             elif mask is not None:
-                effective_mask = mask[:n_ctx, :n_ctx]  # .unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_q)
+                effective_mask = mask[:n_ctx, :n_ctx].unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_q)
 
             if effective_mask is not None and heads_to_mask is not None:
                 # Create a zero-mask tensor of shape (1, heads, 1, 1)
@@ -160,15 +160,21 @@ class MultiHeadAttention(nn.Module):
                 # Set only specified heads to 1.0 (masked heads)
                 head_mask[:, heads_to_mask, :, :] = 1.0
                 # Multiply mask by head-mask: masked heads get original mask, others get zero
-                effective_mask = effective_mask * head_mask
+                effective_mask = effective_mask.to(device=q.device, dtype=q.dtype) * head_mask.to(device=q.device,
+                                                                                                  dtype=q.dtype)
                 # replace nan values with 0
-                effective_mask = torch.nan_to_num(effective_mask, nan=0.0)
+                effective_mask = torch.nan_to_num(effective_mask, nan=0.0).to(device=q.device, dtype=q.dtype)
 
             # Heads not in heads_to_mask will have no mask applied (mask=0 means no effect)
 
-        # Compute scaled dot product attention
+            # Compute scaled dot product attention
         if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and masking == "qk":
-            attn_mask = effective_mask.to(q.dtype) if effective_mask is not None else None
+            attn_mask = effective_mask.to(q.dtype).contiguous() if effective_mask is not None else None
+
+            if attn_mask is not None and attn_mask.shape == (1, 1, 1, 1):
+                # print(attn_mask.shape)
+                attn_mask = None
+
             a = scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=attn_mask)
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk_scores = None
