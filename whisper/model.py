@@ -150,7 +150,7 @@ class MultiHeadAttention(nn.Module):
             if cross_mask is not None:
                 effective_mask = cross_mask.unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
             elif encoder_mask is not None:
-                effective_mask = encoder_mask[:n_ctx, :n_ctx].unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
+                effective_mask = encoder_mask[:n_ctx, :n_ctx]  # (1,1,T_q,T_k)
             elif mask is not None:
                 effective_mask = mask[:n_ctx, :n_ctx].unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_q)
 
