@@ -54,12 +54,12 @@ def transcribe(
         hallucination_silence_threshold: Optional[float] = None,
 
         mask_type: Literal[
-            "encoder_attn", "cross_attn", "both"] = "cross_mask",
+            "encoder_attn", "cross_attn", "both", "mel_feature"] = "cross_mask",
         decoder_masking_layers: Optional[List[int]] = None,
         encoder_masking_layers: Optional[List[int]] = None,
 
         transcription_intervals: Optional[List[Tuple[int, int]]] = None,
-        min_transcription_interval_last_segment: int = 500,
+        min_transcription_interval_last_segment: int = 0,
 
         **decode_options,
 ):

@@ -114,7 +114,7 @@ class DecodingOptions:
     fp16: bool = True  # use fp16 for most of the calculation
 
     voice_intervals: Optional[List[Tuple[int, int]]] = None
-    audio_masking_type: Literal["encoder_attn", "cross_attn", "both"] = "encoder_attn"
+    audio_masking_type: Literal["encoder_attn", "cross_attn", "both", "mel_feature"] = "encoder_attn"
 
     # Auf welche Layer soll Maskierung angewendet werden im Decoder
     decoder_masking_layers: Optional[List[int]] = None
@@ -658,6 +658,29 @@ class DecodingTask:
         if self.options.fp16:
             mel = mel.half()
 
+        if self.options.audio_masking_type == "mel_feature":
+
+            masked_mel: Tensor = torch.full(
+                mel.shape,
+                fill_value=-0.73877,
+                dtype=mel.dtype,
+                device=mel.device,
+            )
+
+            scale = 3000 / 30_000.0
+            for (start_ms, end_ms) in self.options.voice_intervals:
+                s = int(max(0, start_ms * scale))
+                e = int(min(self.model.dims.n_audio_ctx, end_ms * scale))
+                if s < e:
+                    masked_mel[:, :, s:e] = mel[:, :, s:e]
+
+            mel = masked_mel
+
+        # viz mel using matplotlib
+        # import matplotlib.pyplot as plt
+        # plt.imshow(mel[0].cpu().numpy())
+        # plt.show()
+
         if mel.shape[-2:] != (self.model.dims.n_audio_ctx, self.model.dims.n_audio_state):
             silence_mask = None
 
@@ -695,12 +718,6 @@ class DecodingTask:
             n_audio_ctx: int,
             n_audio: int
     ) -> Optional[torch.Tensor]:
-        """
-        Gibt eine boolesche Self‑Attention‑Maske zurück.
-        shape: (n_audio, 1, n_audio_ctx, n_audio_ctx)
-        True = darf *nicht* attendieren  (Stille)
-        False = darf attendieren        (Speech)
-        """
         if self.options.voice_intervals is None:
             return None
 
@@ -712,52 +729,32 @@ class DecodingTask:
             device=self.model.device,
         )
 
-        # Audio‑Länge 30 000 ms  ⇒ Skalierungsfaktor für Frames
         scale = n_audio_ctx / 30_000.0
         for (start_ms, end_ms) in self.options.voice_intervals:
             s = int(max(0, start_ms * scale))
             e = int(min(n_audio_ctx, end_ms * scale))
             if s < e:
-                mask[:, s:e] = 0  # hier liegt Sprache vor
+                mask[:, s:e] = 0
 
-        # 2) Quadratisch machen:
-        # Ein Frame i darf j nicht sehen, wenn i **oder** j Stille ist  (OR).
-        #   mask[:, None, :] : (batch, 1, T)
-        #   mask[:, :, None] : (batch, T, 1)
-        # Combine to 2D mask: speech-speech pairs 0, any silence -1e9
         mask_sq = torch.min(mask[:, None, :], mask[:, :, None])  # (batch, T, T)
 
-        # 3) Für Multi‑Head‑Attention noch einen "heads"‑dummy einschieben (broadcastbar):
         mask_sq = mask_sq.unsqueeze(1)  # (batch, 1, T, T)
 
         return mask_sq
 
     def get_cross_attn_mask(self, smooth=False) -> Optional[torch.Tensor]:
-        """
-        Berechnet eine Attention-Maske für den Decoder-Cross-Attention-Mechanismus.
-        Erlaubte Frames werden standardmäßig mit 1.0 markiert, nicht erlaubte mit -∞.
-        Wenn smooth=True gesetzt ist, wird ein glatter Übergang (Ramp-up und Ramp-down)
-        zwischen erlaubten und maskierten Bereichen eingeführt.
-        Falls keine Sprachintervalle (voice_intervals) vorhanden sind, wird None zurückgegeben.
-        """
+
         if self.options.audio_masking_type in ("cross_attn", "both"):
             n_audio_ctx = self.model.dims.n_audio_ctx
 
-            # Falls keine voice_intervals vorliegen, gib None zurück.
             if self.options.voice_intervals is None:
                 return None
 
-            # Definiere den unteren Maskierungswert:
-            # Im unsmoothten Fall verwenden wir wirklich -∞,
-            # im smoothten Fall wird ein sehr kleiner Wert benutzt, sodass eine Interpolation möglich ist.
-            # low_val = float("-inf") if not smooth else -1.00
             low_val = float("-inf") if not smooth else -1.00
 
             # Initialisiere die Maske mit dem unteren Wert.
             mask = torch.full((n_audio_ctx,), low_val)
 
-            # Skalierungsfaktor: Annahme einer Audiodauer von 30 Sekunden,
-            # wobei 30000 ms auf n_audio_ctx Frames abgebildet werden.
             scale = n_audio_ctx / 30000.0
 
             for (start, end) in self.options.voice_intervals:
@@ -765,36 +762,25 @@ class DecodingTask:
                 e = int(min(n_audio_ctx, end * scale))
                 if s < e:
                     if not smooth:
-                        # Klassische, harte Maske
                         mask[s:e] = 0.0
                     else:
-                        # Glätten der Maske durch lineare Übergänge an den Rändern.
                         length = e - s
-                        # Definiere die Übergangslänge (margin): maximal 40 Frames,
-                        # wobei sie nicht größer als die halbe Länge des Intervalls sein darf.
                         margin = min(40, length // 2) if length >= 2 else 0
 
-                        # Falls das Intervall den Anfang (s == 0) oder das Ende (e == n_audio_ctx) der Sequenz berührt,
-                        # soll für den entsprechenden Bereich kein Ramping erfolgen.
                         ramp_up_margin = margin if s > 0 else 0
                         ramp_down_margin = margin if e < n_audio_ctx else 0
 
                         if ramp_up_margin > 0 or ramp_down_margin > 0:
-                            # Ramp-up, falls anwendbar.
                             if ramp_up_margin > 0:
                                 ramp_up = torch.linspace(low_val, 1.0, steps=ramp_up_margin, device=mask.device)
                                 mask[s:s + ramp_up_margin] = ramp_up
-                            # Zentraler Bereich: konstanter Wert 1.0.
                             mask[s + ramp_up_margin:e - ramp_down_margin] = 1.0
-                            # Ramp-down, falls anwendbar.
                             if ramp_down_margin > 0:
                                 ramp_down = torch.linspace(1.0, low_val, steps=ramp_down_margin, device=mask.device)
                                 mask[e - ramp_down_margin:e] = ramp_down
                         else:
-                            # Kein Ramping, da das Intervall den Rand berührt oder zu kurz ist.
                             mask[s:e] = 1.0
 
-            # Unsqueeze, falls von der Aufruferseite ein Batch-Dimension erwartet wird.
             return mask.unsqueeze(0)
         else:
             return None
