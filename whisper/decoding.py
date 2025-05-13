@@ -814,7 +814,7 @@ class DecodingTask:
 
                 # expand the tokens tensor with the selected next tokens
                 tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
-                # print([tokenizer.decode(t).strip() for t in tokens])
+                print([tokenizer.decode(t).strip() for t in tokens])
 
                 if completed or tokens.shape[-1] > self.n_ctx:
                     break
@@ -958,7 +958,20 @@ def decode(
         # 3) Klartext‑Strings bauen
         token_strings = [tokenizer.decode([tid]) for tid in token_ids]  # + ["<|endoftext|>"]
 
+        model_name = model.dims.n_text_layer
+        if model.dims.n_text_layer == 32:
+            model_name = "large-v3"
+        elif model.dims.n_text_layer == 12:
+            model_name = "small"
+        elif model.dims.n_text_layer == 4:
+            if model.dims.n_audio_layer == 32:
+                model_name = "turbo"
+            else:
+                model_name = "tiny"
+
         # 4) HTML‑Speicherung
-        rec.save_html(token_strings, filename=f"{options.audio_masking_type}_{options.decoder_masking_layers}.html")
+        # print(model)
+        rec.save_html(token_strings,
+                      filename=f"{model_name}_{options.audio_masking_type}_{options.decoder_masking_layers}.html")
 
     return result[0] if single else result
