@@ -80,7 +80,7 @@ def sinusoids(length, channels, max_timescale=10000):
 def disable_sdpa():
     prev_state = MultiHeadAttention.use_sdpa
     try:
-        MultiHeadAttention.use_sdpa = True
+        MultiHeadAttention.use_sdpa = False
         yield
     finally:
         MultiHeadAttention.use_sdpa = prev_state
