@@ -2,7 +2,7 @@ import base64
 import gzip
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple, Literal
 
 import numpy as np
 import torch
@@ -131,11 +131,16 @@ class MultiHeadAttention(nn.Module):
             v: Tensor,
             mask: Optional[Tensor] = None,
             cross_mask: Optional[Tensor] = None,
+            substitution_type: Literal["default", "mean", "interpolation"] = "default",
             encoder_mask: Optional[Tensor] = None,
             layer: Optional[int] = None,
             masking: str = "qk",
             heads_to_mask: Optional[List[int]] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
+        # TODO: Implement the substitution_type parameter
+        #      - "default": same as now, when cross attention is used
+        #      - "mean": Set the masked sections in the cross_mask in the specfied layers and heads to the mean of the unmasked sections (tricky to implement because of the addition of the mask to the qk scores)
+        #      - "interpolation": Set the masked sections in the cross_mask in the specfied layers and heads to the mean of the first column of the right and left sections (tricky to implement because of the addition of the mask to the qk scores)
 
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25

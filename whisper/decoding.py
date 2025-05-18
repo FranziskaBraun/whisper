@@ -814,7 +814,7 @@ class DecodingTask:
 
                 # expand the tokens tensor with the selected next tokens
                 tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
-                print([tokenizer.decode(t).strip() for t in tokens])
+                # print([tokenizer.decode(t).strip() for t in tokens])
 
                 if completed or tokens.shape[-1] > self.n_ctx:
                     break
