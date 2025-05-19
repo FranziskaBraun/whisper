@@ -98,104 +98,288 @@ class MultiHeadAttention(nn.Module):
         self.out = Linear(n_state, n_state)
 
     def forward(
-            self,
-            x: Tensor,
-            xa: Optional[Tensor] = None,
-            mask: Optional[Tensor] = None,
-            kv_cache: Optional[dict] = None,
-            cross_mask: Optional[Tensor] = None,
-            encoder_mask: Optional[Tensor] = None,
-            layer: Optional[int] = None,
-            heads_to_mask: Optional[List[int]] = None,
+        self,
+        x: Tensor,
+        xa: Optional[Tensor] = None,
+        mask: Optional[Tensor] = None,
+        kv_cache: Optional[dict] = None,
+        cross_mask: Optional[Tensor] = None,
+        encoder_mask: Optional[Tensor] = None,
+        layer: Optional[int] = None,
+        heads_to_mask: Optional[List[int]] = None,
+        substitution_type: Literal["default", "mean", "interpolation"] = "default",
     ):
+        """
+        * **Self-Attention**  (`xa is None`):   `qkv_self_attention`
+        * **Cross-Attention** (`xa is not None`): `qkv_cross_attention`
+        """
         q = self.query(x)
 
         if kv_cache is None or xa is None or self.key not in kv_cache:
-            # hooks, if installed (i.e. kv_cache is not None), will prepend the cached kv tensors;
-            # otherwise, perform key/value projections for self- or cross-attention as usual.
             k = self.key(x if xa is None else xa)
             v = self.value(x if xa is None else xa)
-        else:
-            # for cross-attention, calculate keys and values once and reuse in subsequent calls.
+        else:  # gecachte Keys/Values (nur Cross-Attention)
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        wv, qk = self.qkv_attention(q, k, v, mask, cross_mask=cross_mask, encoder_mask=encoder_mask, layer=layer,
-                                    heads_to_mask=heads_to_mask)
+        if xa is None:  # Self-Attention
+            wv, qk = self.qkv_self_attention(
+                q,
+                k,
+                v,
+                mask=mask,
+                encoder_mask=encoder_mask,
+                layer=layer,
+                heads_to_mask=heads_to_mask,
+            )
+        else:  # Cross-Attention
+            wv, qk = self.qkv_cross_attention(
+                q,
+                k,
+                v,
+                cross_mask=cross_mask,
+                layer=layer,
+                heads_to_mask=heads_to_mask,
+                substitution_type=substitution_type,
+            )
+
         return self.out(wv), qk
 
-    def qkv_attention(
-            self,
-            q: Tensor,
-            k: Tensor,
-            v: Tensor,
-            mask: Optional[Tensor] = None,
-            cross_mask: Optional[Tensor] = None,
-            substitution_type: Literal["default", "mean", "interpolation"] = "default",
-            encoder_mask: Optional[Tensor] = None,
-            layer: Optional[int] = None,
-            masking: str = "qk",
-            heads_to_mask: Optional[List[int]] = None,
+    def qkv_self_attention(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        mask: Optional[Tensor] = None,
+        encoder_mask: Optional[Tensor] = None,
+        layer: Optional[int] = None,
+        heads_to_mask: Optional[List[int]] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
-        # TODO: Implement the substitution_type parameter
-        #      - "default": same as now, when cross attention is used
-        #      - "mean": Set the masked sections in the cross_mask in the specfied layers and heads to the mean of the unmasked sections (tricky to implement because of the addition of the mask to the qk scores)
-        #      - "interpolation": Set the masked sections in the cross_mask in the specfied layers and heads to the mean of the first column of the right and left sections (tricky to implement because of the addition of the mask to the qk scores)
+        """
+        Reine Self-Attention -- beachtet nur die quadratische Sequenz-Maske
+        (`mask`) oder eine optionale Encoder-Maske.
 
+        Die Implementierung ist ansonsten identisch zur alten `qkv_attention`.
+        """
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
-        q = q.view(n_batch, n_ctx, self.n_head, -1).permute(0, 2, 1, 3)  # (B, heads, T_q, D)
-        k = k.view(n_batch, k.shape[1], self.n_head, -1).permute(0, 2, 1, 3)  # (B, heads, T_k, D)
-        v = v.view(n_batch, v.shape[1], self.n_head, -1).permute(0, 2, 1, 3)  # (B, heads, T_k, D)
 
-        # Default: No masking
-        effective_mask = None
+        # heads first: (B, H, T, D)
+        q = q.view(n_batch, n_ctx, self.n_head, -1).permute(0, 2, 1, 3)
+        k = k.view(n_batch, k.shape[1], self.n_head, -1).permute(0, 2, 1, 3)
+        v = v.view(n_batch, v.shape[1], self.n_head, -1).permute(0, 2, 1, 3)
 
-        if masking == "qk":
-            if cross_mask is not None:
-                effective_mask = cross_mask.unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_k)
-            elif encoder_mask is not None:
-                effective_mask = encoder_mask[:n_ctx, :n_ctx]  # (1,1,T_q,T_k)
-            elif mask is not None:
-                effective_mask = mask[:n_ctx, :n_ctx].unsqueeze(0).unsqueeze(0)  # (1,1,T_q,T_q)
+        effective_mask: Optional[Tensor] = None
+        if mask is not None:
+            effective_mask = mask[:n_ctx, :n_ctx].unsqueeze(0).unsqueeze(0)
+        elif encoder_mask is not None:
+            effective_mask = encoder_mask[:n_ctx, :n_ctx]
 
-            if effective_mask is not None and heads_to_mask is not None:
-                # Create a zero-mask tensor of shape (1, heads, 1, 1)
-                head_mask = torch.zeros((1, self.n_head, 1, 1), device=q.device, dtype=q.dtype)
-                # Set only specified heads to 1.0 (masked heads)
-                head_mask[:, heads_to_mask, :, :] = 1.0
-                # Multiply mask by head-mask: masked heads get original mask, others get zero
-                effective_mask = effective_mask.to(device=q.device, dtype=q.dtype) * head_mask.to(device=q.device,
-                                                                                                  dtype=q.dtype)
-                # replace nan values with 0
-                effective_mask = torch.nan_to_num(effective_mask, nan=0.0).to(device=q.device, dtype=q.dtype)
+        # Head-spezifische Maskierung
+        if effective_mask is not None and heads_to_mask:
+            head_mask = torch.zeros((1, self.n_head, 1, 1), dtype=q.dtype, device=q.device)
+            head_mask[:, heads_to_mask] = 1.0
+            effective_mask = torch.nan_to_num(effective_mask, nan=0.0) * head_mask
 
-            # Heads not in heads_to_mask will have no mask applied (mask=0 means no effect)
-
-            # Compute scaled dot product attention
-        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and masking == "qk":
+        # ------------------------- Berechnung ------------------------- #
+        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa:
             attn_mask = effective_mask.to(q.dtype).contiguous() if effective_mask is not None else None
-
             if attn_mask is not None and attn_mask.shape == (1, 1, 1, 1):
-                # print(attn_mask.shape)
-                attn_mask = None
-
+                attn_mask = None  # Spezialfall: keine echte Maske
             a = scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=attn_mask)
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk_scores = None
-
         else:
-            # Compute qk scores manually
+            qk_scores = (q * scale) @ (k * scale).transpose(-1, -2)
+            if effective_mask is not None:
+                qk_scores = qk_scores + effective_mask
+            w = F.softmax(qk_scores.float(), dim=-1).to(q.dtype)
+            out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
+
+            # Optionales Logging
+            if layer is not None and n_batch == 1:
+                from .attn_recorder import get_recorder
+                rec = get_recorder()
+                if rec is not None:
+                    rec.add(layer, w.mean(dim=1)[0])
+
+        return out, qk_scores
+
+    def qkv_cross_attention(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        cross_mask: Optional[Tensor] = None,
+        substitution_type: Literal["default", "mean", "interpolation"] = "default",
+        layer: Optional[int] = None,
+        heads_to_mask: Optional[List[int]] = None,
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+        """
+        Klassische Cross-Attention (Decoder-Queries auf Encoder-Keys/Values).
+
+        Ausschließliche Verwendung der Cross-Mask (`cross_mask`), keine
+        Betrachtung der Self-Mask oder `encoder_mask`.
+        """
+        n_batch, n_q, n_state = q.shape
+        scale = (n_state // self.n_head) ** -0.25
+
+        q = q.view(n_batch, n_q, self.n_head, -1).permute(0, 2, 1, 3)
+        k = k.view(n_batch, k.shape[1], self.n_head, -1).permute(0, 2, 1, 3)
+        v = v.view(n_batch, v.shape[1], self.n_head, -1).permute(0, 2, 1, 3)
+
+        effective_mask: Optional[Tensor] = None
+        if cross_mask is not None:
+            effective_mask = cross_mask.unsqueeze(0).unsqueeze(0)
+
+        # Head-spezifische Maskierung
+        if effective_mask is not None and heads_to_mask:
+            head_mask = torch.zeros((1, self.n_head, 1, 1), dtype=q.dtype, device=q.device)
+            head_mask[:, heads_to_mask] = 1.0
+            effective_mask = torch.nan_to_num(effective_mask, nan=0.0) * head_mask
+
+        # ------------------------- Berechnung ------------------------- #
+        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa:
+            attn_mask = effective_mask.to(q.dtype).contiguous() if effective_mask is not None else None
+            if attn_mask is not None and attn_mask.shape == (1, 1, 1, 1):
+                attn_mask = None
+            a = scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=attn_mask)
+            out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
+            qk_scores = None
+        else:
             qk_scores = (q * scale) @ (k * scale).transpose(-1, -2)
 
             if effective_mask is not None:
-                qk_scores = qk_scores + effective_mask
+                # Vollständig auf die Ziel-Shape expandieren
+                mask_bool = torch.isinf(effective_mask) | (effective_mask < 0)
+                mask_full = mask_bool.expand_as(qk_scores)  # (B,H,Tq,Tk)
 
-            qk_scores = qk_scores.float()
-            w = F.softmax(qk_scores, dim=-1).to(q.dtype)
+                print(f"Substitution type: {substitution_type}")
+
+                if substitution_type == "default":
+                    qk_scores = qk_scores + effective_mask.expand_as(qk_scores)
+
+                elif substitution_type == "mean":
+                    # Zeilenmittel (über unmaskierte Keys)
+                    masked_scores = qk_scores.masked_fill(mask_full, 0.0)
+                    counts = (~mask_full).sum(dim=-1, keepdim=True).clamp(min=1)
+                    row_means = masked_scores.sum(dim=-1, keepdim=True) / counts
+                    qk_scores = qk_scores.masked_scatter(
+                        mask_full, row_means.expand_as(qk_scores)[mask_full]
+                    )
+
+
+                elif substitution_type == "interpolation":
+
+                    B, H, Tq, Tk = qk_scores.shape
+
+                    for b in range(B):
+
+                        for h in range(H):
+
+                            for t in range(Tq):
+
+                                row_mask = mask_full[b, h, t]  # (Tk,)
+
+                                if not row_mask.any().item():
+                                    continue  # keine Masken in dieser Zeile
+
+                                row_scores = qk_scores[b, h, t]  # (Tk,)
+
+                                masked_idx = torch.where(row_mask)[0]
+
+                                # ---------- zusammenhängende Blöcke finden ----------
+
+                                blocks = []
+
+                                start = masked_idx[0].item()
+
+                                prev = start
+
+                                for idx in masked_idx[1:]:
+
+                                    i = idx.item()
+
+                                    if i == prev + 1:
+
+                                        prev = i
+
+                                    else:
+
+                                        blocks.append(torch.arange(start, prev + 1,
+
+                                                                   device=row_scores.device))
+
+                                        start = prev = i
+
+                                blocks.append(torch.arange(start, prev + 1,
+
+                                                           device=row_scores.device))
+
+                                # ---------- jeden Block ersetzen -------------------
+
+                                for block in blocks:
+
+                                    left_idx = block[0].item() - 1
+
+                                    right_idx = block[-1].item() + 1
+
+                                    left_val = (
+
+                                        row_scores[left_idx]
+
+                                        if left_idx >= 0 and not row_mask[left_idx] else None
+
+                                    )
+
+                                    right_val = (
+
+                                        row_scores[right_idx]
+
+                                        if right_idx < Tk and not row_mask[right_idx] else None
+
+                                    )
+
+                                    # --- neuen Wert berechnen (als Python-float) ----
+
+                                    if left_val is not None and right_val is not None:
+
+                                        new_val_float = (left_val.item() + right_val.item()) / 2
+
+                                    elif left_val is not None:
+
+                                        new_val_float = left_val.item()
+
+                                    elif right_val is not None:
+
+                                        new_val_float = right_val.item()
+
+                                    else:
+
+                                        unmasked = row_scores[~row_mask]
+
+                                        new_val_float = (
+
+                                            unmasked.mean().item() if unmasked.numel() > 0 else 0.0
+
+                                        )
+
+                                    # alias-freien Tensor erzeugen
+
+                                    new_val = row_scores.new_tensor(new_val_float)
+
+                                    # schreiben (kein Alias mehr → kein RuntimeError)
+
+                                    row_scores[block] = new_val
+                else:
+                    raise ValueError(f"Unbekannter substitution_type: {substitution_type!r}")
+
+            w = F.softmax(qk_scores.float(), dim=-1).to(q.dtype)
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
 
-            # Optional: attention recording
+            # Optionales Logging
             if layer is not None and n_batch == 1:
                 from .attn_recorder import get_recorder
                 rec = get_recorder()
@@ -233,13 +417,14 @@ class ResidualAttentionBlock(nn.Module):
             layer: Optional[int] = None,
             encoder_heads_to_mask: Optional[List[int]] = None,
             decoder_heads_to_mask: Optional[List[int]] = None,
+            substitution_type: Literal["default", "mean", "interpolation"] = "default",
     ):
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache, encoder_mask=encoder_mask,
                           heads_to_mask=encoder_heads_to_mask)[0]
         if self.cross_attn:
             x = x + self.cross_attn(
                 self.cross_attn_ln(x), xa, kv_cache=kv_cache, cross_mask=cross_attn_mask, layer=layer,
-                heads_to_mask=decoder_heads_to_mask
+                heads_to_mask=decoder_heads_to_mask, substitution_type=substitution_type
             )[0]
         x = x + self.mlp(self.mlp_ln(x))
         return x
@@ -322,6 +507,7 @@ class TextDecoder(nn.Module):
             cross_attn_mask: Optional[Tensor] = None,  # Übergabeparameter für Cross-Attention-Maskierung
             masking_layers: Optional[List[int]] = None,
             heads_to_mask_dict: Optional[Dict[int, List[int]]] = None,
+            substitution_type: Literal["default", "mean", "interpolation"] = "default",
     ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
@@ -357,7 +543,8 @@ class TextDecoder(nn.Module):
                 cross_attn_mask=tmp,
                 kv_cache=kv_cache,
                 layer=idx,
-                decoder_heads_to_mask=heads_to_mask
+                decoder_heads_to_mask=heads_to_mask,
+                substitution_type=substitution_type,
             )
 
         x = self.ln(x)

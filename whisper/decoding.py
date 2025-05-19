@@ -116,6 +116,9 @@ class DecodingOptions:
     voice_intervals: Optional[List[Tuple[int, int]]] = None
     audio_masking_type: Literal["encoder_attn", "cross_attn", "both", "mel_feature"] = "encoder_attn"
 
+    # How to mask the cross attention
+    substitution_type: Literal["default", "mean", "interpolation"] = "default"
+
     # Auf welche Layer soll Maskierung angewendet werden im Decoder
     decoder_masking_layers: Optional[List[int]] = None
     encoder_masking_layers: Optional[List[int]] = None
@@ -139,7 +142,7 @@ class DecodingResult:
 
 class Inference:
     def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Tensor,
-               masking_layers: Optional[List[int]], heads_to_mask_dict: Optional[Dict[int, List[int]]]) -> Tensor:
+               masking_layers: Optional[List[int]], heads_to_mask_dict: Optional[Dict[int, List[int]]], substitution_type: Literal["default", "mean", "interpolation"] = "default") -> Tensor:
         """Perform a forward pass on the decoder and return per-token logits"""
         raise NotImplementedError
 
@@ -164,7 +167,7 @@ class PyTorchInference(Inference):
         self.kv_modules = key_modules + value_modules
 
     def logits(self, tokens: Tensor, audio_features: Tensor, cross_attn_mask: Optional[Tensor],
-               masking_layers: Optional[List[int]], heads_to_mask_dict: Optional[Dict[int, List[int]]]) -> Tensor:
+               masking_layers: Optional[List[int]], heads_to_mask_dict: Optional[Dict[int, List[int]]], substitution_type: Literal["default", "mean", "interpolation"] = "default") -> Tensor:
         if not self.kv_cache:
             self.kv_cache, self.hooks = self.model.install_kv_cache_hooks()
 
@@ -173,7 +176,7 @@ class PyTorchInference(Inference):
             tokens = tokens[:, -1:]
 
         return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache, cross_attn_mask=cross_attn_mask,
-                                  masking_layers=masking_layers, heads_to_mask_dict=heads_to_mask_dict)
+                                  masking_layers=masking_layers, heads_to_mask_dict=heads_to_mask_dict, substitution_type=substitution_type)
 
     def cleanup_caching(self):
         for hook in self.hooks:
@@ -797,7 +800,7 @@ class DecodingTask:
                 # print(f"Logit round: {i}")
                 logits = self.inference.logits(tokens, audio_features, cross_attn_mask,
                                                self.options.decoder_masking_layers,
-                                               heads_to_mask_dict=self.options.decoder_heads_to_mask_dict)
+                                               heads_to_mask_dict=self.options.decoder_heads_to_mask_dict, substitution_type=self.options.substitution_type)
 
                 if (
                         i == 0 and self.tokenizer.no_speech is not None
