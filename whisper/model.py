@@ -256,8 +256,6 @@ class MultiHeadAttention(nn.Module):
                 mask_bool = torch.isinf(effective_mask) | (effective_mask < 0)
                 mask_full = mask_bool.expand_as(qk_scores)  # (B,H,Tq,Tk)
 
-                print(f"Substitution type: {substitution_type}")
-
                 if substitution_type == "default":
                     qk_scores = qk_scores + effective_mask.expand_as(qk_scores)
 
