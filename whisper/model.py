@@ -234,7 +234,7 @@ class MultiHeadAttention(nn.Module):
 
         effective_mask: Optional[Tensor] = None
         if cross_mask is not None:
-            effective_mask = cross_mask.unsqueeze(0).unsqueeze(0)
+            effective_mask = cross_mask.unsqueeze(0).unsqueeze(0).to(q.device)
 
         # Head-spezifische Maskierung
         if effective_mask is not None and heads_to_mask:
