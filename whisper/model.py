@@ -252,7 +252,12 @@ class MultiHeadAttention(nn.Module):
             # Maske invertieren: wo effective_mask -inf oder negativ ist, soll v auf 0 gesetzt werden
             mask_bool = torch.isinf(v_mask) | (v_mask < 0)
 
-            # V auf 0 setzen an maskierten Positionen
+            # v_masked = v.masked_fill(~mask_bool, 0.0)  # Nur maskierte Werte behalten
+            # v_unmasked = v.masked_fill(mask_bool, 0.0)  # Nur nicht-maskierte Werte behalten
+
+            # sum_masked = v_masked.sum(dim=2, keepdim=True)  # Shape: (B, H, 1, D)
+            # sum_unmasked = v_unmasked.sum(dim=2, keepdim=True)  # Shape: (B, H, 1, D)
+
             v = v.masked_fill(mask_bool, 0.0)
 
             # Bei V-Masking keine weitere Maskierung der QK-Scores
