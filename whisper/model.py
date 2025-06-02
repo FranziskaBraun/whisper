@@ -216,7 +216,7 @@ class MultiHeadAttention(nn.Module):
             substitution_type: Literal["default", "mean", "interpolation"] = "default",
             layer: Optional[int] = None,
             heads_to_mask: Optional[List[int]] = None,
-            masking_type: Literal["qk", "v"] = "v",
+            masking_type: Literal["qk", "v"] = "qk",
             # if v is used, the substitution_type is ignored -> v is nulled using the mask
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """
